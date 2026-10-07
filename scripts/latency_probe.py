@@ -1,6 +1,6 @@
 """Pretend to be Exotel and measure the engine's real latency with real providers.
 
-    python scripts/latency_probe.py --url ws://127.0.0.1:8800/ws/exotel?token=XXX \
+    python scripts/latency_probe.py --url ws://127.0.0.1:8000/ws/exotel?token=XXX \
         --to 08047112233 --say question.wav [--say followup.wav] --out reply.wav
 
 Each --say file must be 8 kHz mono 16-bit WAV with no trailing silence

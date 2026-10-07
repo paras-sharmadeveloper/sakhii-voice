@@ -12,13 +12,13 @@ Laravel stays the control plane (agents, billing, numbers, KYC, knowledge). Elev
 Conversational AI agents keep running through Laravel as they do today. This engine is
 only the new pipeline path.
 
-Stack: Python 3.12, FastAPI, uvicorn, Pipecat 1.12 (pinned), Redis.
+Stack: Python 3.12 (3.11+ supported), FastAPI, uvicorn, Pipecat 1.12 (pinned), Redis.
 
 ## Layout
 
 ```
 app/
-  main.py            FastAPI app: /ws/exotel, /healthz
+  main.py            FastAPI app: /ws/exotel, /healthz (public as /health)
   pipeline.py        one call: transport, turn detection, greeting, limits, logging
   agent_config.py    the agent JSON Laravel writes (mirrors the Agent Builder tabs)
   prompt.py          system prompt, {placeholders}, pronunciation rules
@@ -252,47 +252,106 @@ Use the native Voicebot applet. No SIP trunk is involved.
 uv venv -p 3.12 .venv && source .venv/bin/activate
 uv pip install -r pyproject.toml --extra dev
 cp .env.example .env            # add API keys
-uvicorn app.main:app --port 8800 --loop uvloop
+uvicorn app.main:app --port 8000 --loop uvloop
 pytest                          # needs a local redis-server for the e2e tests
 ```
 
 Measure real latency against a running engine (agent mapped to the `--to` number):
 
 ```bash
-python scripts/latency_probe.py --url "ws://127.0.0.1:8800/ws/exotel?token=$EXOTEL_WS_TOKEN" \
+python scripts/latency_probe.py --url "ws://127.0.0.1:8000/ws/exotel?token=$EXOTEL_WS_TOKEN" \
     --to 08047112233 --say question.wav --out reply.wav
 ```
 
 ## Deploy
 
-GitHub Actions (`.github/workflows/deploy.yml`) runs the tests on every push and PR.
-When a push to `main` passes, it deploys to the server over SSH:
+The engine runs as one systemd service, `sakhii-voice`. It listens on
+**127.0.0.1:8000 only**, so the web server already on the box is the only public
+entry point:
 
-1. The code is uploaded to `/opt/sakhii-voice/releases/<timestamp>-<sha>/`, and its
-   own `.venv` is built there.
-2. `/opt/sakhii-voice/current` is switched to the new release.
-3. The two engine instances (`sakhii-voice@8800` and `sakhii-voice@8801`, behind nginx)
-   restart one at a time. A stopping instance closes its port at once, so nginx sends
-   new calls to the other instance. Live calls on it finish first, up to the max call
-   length. No calls are dropped or refused.
-4. Each instance has to pass `/healthz` within 30 s. If it doesn't, `current` goes back
-   to the previous release and the deploy fails. The last 5 releases are kept.
-
-**One-time server setup** (Ubuntu, as root, with the repo checked out anywhere):
-
-```bash
-ssh-keygen -t ed25519 -f sakhii-deploy -N ""   # on your machine; the private key goes to GitHub
-sudo bash deploy/bootstrap.sh voice.YOURDOMAIN.com "$(cat sakhii-deploy.pub)"
-sudo -u sakhii nano /opt/sakhii-voice/shared/.env   # API keys, REDIS_*, EXOTEL_WS_TOKEN
+```
+Exotel ──wss://voice.YOURDOMAIN.com/ws/exotel──▶ Apache (Webuzo, :443, Let's Encrypt)
+                                                   └─ws://127.0.0.1:8000/ws/exotel──▶ sakhii-voice
 ```
 
-`bootstrap.sh` does the following:
-- creates the `sakhii` user;
-- installs uv, Python 3.12, nginx and certbot;
-- installs the systemd template and the nginx vhost, and gets the TLS certificate;
-- lets `sakhii` restart only the two engine units via sudo.
+### Pipeline
 
-**GitHub secrets** (repo, then Settings, then Secrets and variables, then Actions):
+GitHub Actions (`.github/workflows/deploy.yml`) runs the tests on every push and PR.
+When a push to `main` passes, it deploys over SSH as the `sakhii` user:
+
+1. The code is uploaded to `/opt/sakhii-voice/releases/<timestamp>-<sha>/`, and its
+   own `.venv` is built there with the Python that bootstrap picked
+   (`/opt/sakhii-voice/shared/python`).
+2. `/opt/sakhii-voice/current` is switched to the new release, and `sakhii-voice` is
+   restarted.
+3. The engine has to pass the health check within 30 s. If it doesn't, `current` goes
+   back to the previous release and the deploy fails. The last 5 releases are kept.
+
+**Restarts refuse new calls while live calls finish.** On restart, the old process stops
+accepting connections and lets live calls finish, for up to the max call length
+(10 min). Calls arriving in that window are refused. Deploy outside busy hours.
+
+### One-time server setup: AlmaLinux / RHEL with Webuzo (Apache)
+
+Webuzo's Apache owns ports 80/443 and its SSL, so bootstrap must not touch nginx or
+certbot.
+
+1. Create the deploy key on your machine. The private key goes to GitHub, the public
+   key to the server:
+
+   ```bash
+   ssh-keygen -t ed25519 -f sakhii-deploy -N ""
+   ```
+
+2. On the server, as root, with the repo checked out anywhere:
+
+   ```bash
+   sudo bash deploy/bootstrap.sh --no-webserver "$(cat sakhii-deploy.pub)"
+   sudo -u sakhii vi /opt/sakhii-voice/shared/.env   # API keys, REDIS_*, EXOTEL_WS_TOKEN
+   ```
+
+   Bootstrap uses dnf or yum (or apt on Debian/Ubuntu). It does the following:
+   - installs rsync, curl, sudo and Python 3.11+. It uses `python3.12`, or `python3.11`
+     from dnf if the system Python is older;
+   - creates the `sakhii` user with the deploy key;
+   - installs uv;
+   - lays out `/opt/sakhii-voice/{releases,shared}`;
+   - installs and enables `sakhii-voice.service`;
+   - allows `sakhii` to restart only that service;
+   - if SELinux is on, sets `httpd_can_network_connect` so Apache may proxy to
+     127.0.0.1:8000.
+
+3. In Webuzo, add the domain `voice.YOURDOMAIN.com` and issue its Let's Encrypt
+   certificate.
+
+4. Add the proxy rules by copying them into the domain's custom config. Webuzo includes
+   these directives in both the HTTP and HTTPS vhosts
+   ([docs](https://webuzo.com/docs/developers/custom-virtualhost-config/)):
+
+   ```bash
+   mkdir -p /var/webuzo-data/apache2/custom/domains
+   cp deploy/apache-webuzo.conf /var/webuzo-data/apache2/custom/domains/voice.YOURDOMAIN.com.conf
+   /usr/local/apps/apache2/bin/httpd -M | grep -E 'proxy_(http|wstunnel)'   # both must be listed
+   ```
+
+   Then rebuild/restart Apache from the Webuzo panel. The rules proxy `/ws/exotel`
+   with `mod_proxy_wstunnel` and `/health` over HTTP, with `ProxyTimeout 600`.
+
+5. Add the GitHub secrets below, then push to `main`. Check with
+   `curl https://voice.YOURDOMAIN.com/health`, which should return `{"ok":true}`.
+
+### Other servers (own nginx + certbot)
+
+```bash
+sudo bash deploy/bootstrap.sh voice.YOURDOMAIN.com "$(cat sakhii-deploy.pub)"
+```
+
+This also installs nginx and certbot, installs `deploy/nginx-voice.conf`, and gets the
+certificate.
+
+### GitHub secrets
+
+Set these in the repo under Settings, then Secrets and variables, then Actions:
 
 | Secret | Value |
 |---|---|
@@ -303,11 +362,13 @@ sudo -u sakhii nano /opt/sakhii-voice/shared/.env   # API keys, REDIS_*, EXOTEL_
 The deploy job uses the `production` environment, so you can add required reviewers
 there if you want a manual approval step before each deploy.
 
-Useful on the server:
-- `systemctl status 'sakhii-voice@*'`
-- `journalctl -u 'sakhii-voice@*' -f`
+### On the server
+
+- `systemctl status sakhii-voice`
+- `journalctl -u sakhii-voice -f`
+- `curl -s 127.0.0.1:8000/healthz`
 - Roll back by hand: `ln -sfn /opt/sakhii-voice/releases/<older> /opt/sakhii-voice/current`,
-  then restart both units.
+  then `systemctl restart sakhii-voice`.
 
 For the lowest provider round trips, host in Mumbai (e.g. AWS `ap-south-1`). Sarvam and
 Exotel are in India, and every hop to Europe or the US adds 100–250 ms per turn.

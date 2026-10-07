@@ -2,7 +2,7 @@
 name = "sakhii-voice"
 version = "0.1.0"
 description = "Sakhii real-time voice engine: Exotel WebSocket -> STT -> LLM -> TTS"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "pipecat-ai[websocket,sarvam,elevenlabs,openai,silero]==1.12.0",
     "fastapi>=0.115",

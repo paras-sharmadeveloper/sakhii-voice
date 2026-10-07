@@ -1,16 +1,76 @@
 #!/usr/bin/env bash
-# One-time server setup (Ubuntu 22.04/24.04), run as root:
-#   sudo bash deploy/bootstrap.sh voice.YOURDOMAIN.com "ssh-ed25519 AAAA... github-deploy"
+# One-time server setup, run as root. Ubuntu/Debian (apt) or RHEL-family such
+# as AlmaLinux (dnf/yum).
+#
+#   Own web server (nginx + certbot set up here):
+#     sudo bash deploy/bootstrap.sh voice.YOURDOMAIN.com "ssh-ed25519 AAAA... github-deploy"
+#
+#   Existing web server, e.g. Webuzo/Apache (no nginx, no certbot):
+#     sudo bash deploy/bootstrap.sh --no-webserver "ssh-ed25519 AAAA... github-deploy"
+#     then add deploy/apache-webuzo.conf to the domain (see README).
+#
 # Afterwards: fill /opt/sakhii-voice/shared/.env, then push to main.
 set -euo pipefail
 
-DOMAIN="${1:?usage: bootstrap.sh <domain> <deploy public key>}"
-DEPLOY_PUBKEY="${2:?usage: bootstrap.sh <domain> <deploy public key>}"
+WEBSERVER=1
+if [ "${1:-}" = "--no-webserver" ]; then
+  WEBSERVER=0
+  shift
+fi
+if [ "$WEBSERVER" = 1 ]; then
+  DOMAIN="${1:?usage: bootstrap.sh <domain> <deploy public key>  |  bootstrap.sh --no-webserver <deploy public key>}"
+  shift
+fi
+DEPLOY_PUBKEY="${1:?usage: bootstrap.sh <domain> <deploy public key>  |  bootstrap.sh --no-webserver <deploy public key>}"
 ROOT=/opt/sakhii-voice
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-apt-get update -y
-apt-get install -y nginx certbot python3-certbot-nginx rsync curl
+# --- packages -------------------------------------------------------------
+
+if command -v apt-get >/dev/null; then
+  PKG=apt
+elif command -v dnf >/dev/null; then
+  PKG=dnf
+elif command -v yum >/dev/null; then
+  PKG=yum
+else
+  echo "!! no apt, dnf or yum found" >&2
+  exit 1
+fi
+
+if [ "$PKG" = apt ]; then
+  apt-get update -y
+  apt-get install -y rsync curl sudo python3
+else
+  "$PKG" install -y rsync curl sudo tar python3
+fi
+
+# Python 3.11+ (Pipecat's minimum); the project prefers 3.12.
+py_ok() { "$1" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; }
+PYTHON=""
+for candidate in python3.12 python3.11 python3; do
+  if command -v "$candidate" >/dev/null && py_ok "$candidate"; then
+    PYTHON="$(command -v "$candidate")"
+    break
+  fi
+done
+if [ -z "$PYTHON" ]; then
+  if [ "$PKG" = apt ]; then
+    apt-get install -y python3.12 || apt-get install -y python3.11
+  else
+    "$PKG" install -y python3.12 || "$PKG" install -y python3.11
+  fi
+  for candidate in python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null && py_ok "$candidate"; then
+      PYTHON="$(command -v "$candidate")"
+      break
+    fi
+  done
+fi
+[ -n "$PYTHON" ] || { echo "!! could not install Python 3.11+" >&2; exit 1; }
+echo ">> using $PYTHON ($("$PYTHON" --version))"
+
+# --- deploy user ----------------------------------------------------------
 
 id sakhii >/dev/null 2>&1 || useradd -m -s /bin/bash sakhii
 install -d -o sakhii -g sakhii -m 700 /home/sakhii/.ssh
@@ -19,31 +79,61 @@ grep -qxF "$DEPLOY_PUBKEY" /home/sakhii/.ssh/authorized_keys 2>/dev/null \
 chown sakhii:sakhii /home/sakhii/.ssh/authorized_keys
 chmod 600 /home/sakhii/.ssh/authorized_keys
 
-# uv (and through it Python 3.12) for the sakhii user.
+# uv only manages the venv and installs packages; it uses $PYTHON.
 sudo -u sakhii bash -lc 'command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh'
-sudo -u sakhii bash -lc '~/.local/bin/uv python install 3.12'
 
 install -d -o sakhii -g sakhii "$ROOT" "$ROOT/releases" "$ROOT/shared"
+# remote_deploy.sh builds each release's venv with this interpreter.
+echo "$PYTHON" > "$ROOT/shared/python"
+chown sakhii:sakhii "$ROOT/shared/python"
 if [ ! -f "$ROOT/shared/.env" ]; then
   install -o sakhii -g sakhii -m 600 "$HERE/../.env.example" "$ROOT/shared/.env"
   echo ">> Edit $ROOT/shared/.env (keys, Redis, EXOTEL_WS_TOKEN) before the first deploy."
 fi
 
-# The deploy user may restart only the engine units.
+# --- service ----------------------------------------------------------------
+
+SYSTEMCTL="$(command -v systemctl)"
+# The deploy user may restart only the engine.
 cat > /etc/sudoers.d/sakhii-voice <<SUDO
-sakhii ALL=(root) NOPASSWD: /usr/bin/systemctl restart sakhii-voice@8800, /usr/bin/systemctl restart sakhii-voice@8801, /usr/bin/systemctl start sakhii-voice@8800, /usr/bin/systemctl start sakhii-voice@8801
+sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice, $SYSTEMCTL start sakhii-voice
 SUDO
 chmod 440 /etc/sudoers.d/sakhii-voice
 visudo -cf /etc/sudoers.d/sakhii-voice
 
-install -m 644 "$HERE/sakhii-voice@.service" /etc/systemd/system/
+install -m 644 "$HERE/sakhii-voice.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable sakhii-voice@8800 sakhii-voice@8801
+systemctl enable sakhii-voice
 
-sed "s/voice.YOURDOMAIN.com/$DOMAIN/g" "$HERE/nginx-voice.conf" > /etc/nginx/sites-available/sakhii-voice
-ln -sf /etc/nginx/sites-available/sakhii-voice /etc/nginx/sites-enabled/sakhii-voice
-if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
-  certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+# SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000.
+if command -v getenforce >/dev/null && [ "$(getenforce)" != Disabled ]; then
+  setsebool -P httpd_can_network_connect 1
 fi
-nginx -t && systemctl reload nginx
+
+# --- web server (skipped with --no-webserver) ----------------------------------
+
+if [ "$WEBSERVER" = 1 ]; then
+  if [ "$PKG" = apt ]; then
+    apt-get install -y nginx certbot python3-certbot-nginx
+  else
+    "$PKG" install -y epel-release || true
+    "$PKG" install -y nginx certbot python3-certbot-nginx
+  fi
+  if [ -d /etc/nginx/sites-available ]; then
+    CONF=/etc/nginx/sites-available/sakhii-voice
+    sed "s/voice.YOURDOMAIN.com/$DOMAIN/g" "$HERE/nginx-voice.conf" > "$CONF"
+    ln -sf "$CONF" /etc/nginx/sites-enabled/sakhii-voice
+  else
+    sed "s/voice.YOURDOMAIN.com/$DOMAIN/g" "$HERE/nginx-voice.conf" > /etc/nginx/conf.d/sakhii-voice.conf
+  fi
+  systemctl enable --now nginx
+  if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+    certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+  fi
+  nginx -t && systemctl reload nginx
+else
+  echo ">> --no-webserver: skipped nginx and certbot. Proxy wss://<domain>/ws/exotel"
+  echo "   to ws://127.0.0.1:8000/ws/exotel (deploy/apache-webuzo.conf)."
+fi
+
 echo ">> Bootstrap done. Add the GitHub secrets and push to main to deploy."

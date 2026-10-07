@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     host: str = "127.0.0.1"
-    port: int = 8800
+    port: int = 8000
     log_level: str = "INFO"
 
     exotel_ws_token: str = ""
