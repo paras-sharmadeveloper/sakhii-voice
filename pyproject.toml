@@ -1,0 +1,20 @@
+[project]
+name = "sakhii-voice"
+version = "0.1.0"
+description = "Sakhii real-time voice engine: Exotel WebSocket -> STT -> LLM -> TTS"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pipecat-ai[websocket,sarvam,elevenlabs,openai,silero]==1.12.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "redis>=5.0",
+    "pydantic-settings>=2.4",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "fakeredis>=2.23", "websockets>=13"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,57 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv venv && uv pip install -r pyproject.toml --extra dev
+      - name: Test
+        run: .venv/bin/pytest -q
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH key
+        run: |
+          install -d -m 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT || 22 }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Upload release
+        env:
+          TARGET: sakhii@${{ secrets.DEPLOY_HOST }}
+          SSH: ssh -i ~/.ssh/id_deploy -p ${{ secrets.DEPLOY_PORT || 22 }}
+        run: |
+          RELEASE=/opt/sakhii-voice/releases/$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          rsync -az -e "$SSH" --exclude .git --exclude .github --exclude tests \
+            --exclude .venv --exclude .env ./ "$TARGET:$RELEASE/"
+      - name: Install and roll out
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.DEPLOY_PORT || 22 }}" "sakhii@${{ secrets.DEPLOY_HOST }}" \
+            "bash $RELEASE/deploy/remote_deploy.sh $RELEASE"

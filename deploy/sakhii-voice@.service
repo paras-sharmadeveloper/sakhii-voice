@@ -1,0 +1,30 @@
+# Template unit: one instance per port (sakhii-voice@8800, sakhii-voice@8801).
+# nginx balances calls across both, so deploys restart them one at a time
+# with no dropped or refused calls.
+[Unit]
+Description=Sakhii voice engine on port %i
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+User=sakhii
+WorkingDirectory=/opt/sakhii-voice/current
+EnvironmentFile=/opt/sakhii-voice/shared/.env
+# Calls never move between workers (each call is one WebSocket on one
+# worker) and shared state lives in Redis. Two instances x 2 workers fits a
+# 4-core box; raise --workers on bigger machines.
+ExecStart=/opt/sakhii-voice/current/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port %i --workers 2 \
+    --loop uvloop --http httptools --ws websockets \
+    --ws-ping-interval 20 --ws-ping-timeout 20 \
+    --timeout-graceful-shutdown 600 --no-access-log
+# On stop, uvicorn closes its port at once (nginx sends new calls to the
+# other instance) and lets live calls finish, up to the max call length.
+KillSignal=SIGTERM
+TimeoutStopSec=620
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
