@@ -230,6 +230,53 @@ Notes on fields:
 `end_reason` is one of `caller_hung_up`, `agent_ended`, `transferred`, `max_duration`,
 or `caller_silent`.
 
+## Test call before the Laravel integration
+
+`scripts/seed_test_agent.py` writes one agent config and one ExoPhone mapping into
+Redis. It writes the same keys and fields Laravel will (see the Redis contract above),
+using the engine's own settings, key builder and config model, so the engine finds
+them exactly as it will find Laravel's.
+
+On the server, run it from the current release as the `sakhii` user. It reads
+`REDIS_URL`, `REDIS_KEY_PREFIX` and the API keys from `/opt/sakhii-voice/shared/.env`,
+the same file the service uses:
+
+```bash
+cd /opt/sakhii-voice/current
+
+# Sarvam STT + gpt-4o-mini + Sarvam Bulbul v3 (voice "priya")
+sudo -u sakhii /opt/sakhii-voice/current/.venv/bin/python scripts/seed_test_agent.py \
+    --exophone 08047112233
+
+# Sarvam STT + gpt-4o-mini + ElevenLabs eleven_flash_v2_5
+sudo -u sakhii /opt/sakhii-voice/current/.venv/bin/python scripts/seed_test_agent.py \
+    --exophone 08047112233 --provider-preset elevenlabs --voice-id <ElevenLabs voice_id>
+
+# Remove the test agent and its mapping
+sudo -u sakhii /opt/sakhii-voice/current/.venv/bin/python scripts/seed_test_agent.py \
+    --exophone 08047112233 --delete
+```
+
+Options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--exophone` | required | ExoPhone in any format (`0804…`, `91804…`, `+91804…`); stored as E.164 |
+| `--agent-id` | `test-agent` | Agent id to write |
+| `--provider-preset` | `sarvam` | `sarvam` or `elevenlabs` (needs `--voice-id`) |
+| `--voice-id` | `priya` for Sarvam | ElevenLabs voice_id, or another Bulbul v3 speaker |
+| `--language` | `hi-IN` | Primary language (code or name). English is added as a second language. |
+| `--greeting`, `--system-prompt` | short Hinglish receptionist | Override the opening line and prompt |
+| `--company` | `Sakhii` | Fills `{company}` |
+| `--force` | off | Overwrite a number already mapped to a different agent (refused by default) |
+| `--env-file` | `shared/.env` if present, else `./.env` | Env file to read |
+
+The script prints the exact keys it wrote, the Redis URL (password masked) and the
+prefix. It warns if an API key the preset needs is missing, then prints the number to
+call. The number must be attached to an Exotel flow with the Voicebot applet (see
+below). `--delete` only removes the number mapping if it still points to this test
+agent. The keys have no expiry, so delete them when you're done.
+
 ## Exotel setup
 
 Use the native Voicebot applet. No SIP trunk is involved.
