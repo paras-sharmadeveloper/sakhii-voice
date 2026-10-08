@@ -1,0 +1,26 @@
+name: Tests
+
+# Tests only. Deploys are manual: deploy/update.sh on the server (README).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv venv && uv pip install -r pyproject.toml --extra dev
+      - name: Test
+        run: .venv/bin/pytest -q

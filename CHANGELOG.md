@@ -1,12 +1,46 @@
 # Changelog
 
-**Rule:** any change to the deploy topology (systemd units, ports, sudoers, the
-Apache/nginx config, bootstrap steps) must list the manual server steps under
-**Server action required** in its entry. A push to `main` deploys the code, but it
-cannot change root-owned server config. Without these steps the deploy fails or
-misroutes calls.
+Any change that needs a step on the server goes here, under
+**Server action required**. Deploys are manual (`deploy/update.sh`), so a
+server step that isn't listed here won't happen.
 
-## 2026-10-08: deploy restarts whatever the server's sudo rule allows
+## 2026-10-08: manual deploy replaces GitHub Actions deploys
+
+- GitHub Actions now only runs the tests (`.github/workflows/test.yml`). Removed: the
+  deploy job, `deploy/remote_deploy.sh`, `deploy/bootstrap.sh`, the `releases/` +
+  `current` layout, the deploy SSH key and sudoers logic, `sakhii-voice@.service` and
+  `deploy/nginx-voice.conf`.
+- New `deploy/setup.sh` (once): clones to `/opt/sakhii-voice/app`, creates the Python
+  3.12 venv in `/opt/sakhii-voice/venv`, removes all older units and the old sudoers
+  rule, and installs and starts one `sakhii-voice.service` (uvicorn on 127.0.0.1:8000,
+  user `sakhii`, `Restart=always`). It keeps `/opt/sakhii-voice/shared/.env`.
+- New `deploy/update.sh` (each update): git pull, reinstall deps, restart, and health
+  check. If unhealthy, it resets to the previous commit, restarts, and prints the last
+  50 journal lines.
+- `deploy/apache-webuzo.conf`: single backend. `/ws/exotel` and `/ws/exotel/<token>` go
+  to `ws://127.0.0.1:8000`, and `/health` to `http://127.0.0.1:8000/healthz`, with
+  `ProxyTimeout 600`.
+- App code is unchanged: path-segment token, log redaction and `seed_test_agent.py`
+  all stay.
+
+### Server action required
+
+1. `git clone https://github.com/paras-sharmadeveloper/sakhii-voice.git /opt/sakhii-voice/app`
+2. `sudo bash /opt/sakhii-voice/app/deploy/setup.sh`
+3. `cp /opt/sakhii-voice/app/deploy/apache-webuzo.conf /var/webuzo-data/apache2/custom/domains/voice.sakhii.io.conf`,
+   then restart Apache (Webuzo panel).
+4. Exotel flow, if not done yet: set the Voicebot URL to
+   `wss://voice.sakhii.io/ws/exotel/<EXOTEL_WS_TOKEN>` (the token goes in the path).
+5. Optional cleanup:
+   - delete the `DEPLOY_HOST`/`DEPLOY_SSH_KEY` GitHub secrets;
+   - remove the GitHub deploy key from `/home/sakhii/.ssh/authorized_keys`.
+
+## Earlier entries
+
+These describe deploy mechanisms that the entry above replaced. They're kept for
+history; their server steps no longer apply.
+
+### 2026-10-08: deploy restarts whatever the server's sudo rule allows
 
 `deploy/remote_deploy.sh` no longer assumes a unit layout. It reads `sudo -n -l` and
 restarts exactly the units that rule allows, with the `systemctl` path spelled the
@@ -19,7 +53,7 @@ This makes deploys work again on the current server, whose rule is the two-insta
 one (`/bin/systemctl restart sakhii-voice@8000/@8001`), with no root step. Rollback
 and the "no rule at all" early exit are unchanged.
 
-### Server action required
+#### Server action required (obsolete)
 
 None for deploys to work.
 
@@ -27,7 +61,7 @@ Optional, to move the server to the single-instance layout described below: run 
 entry's steps when convenient. They end live calls. Deploys keep working before and
 after.
 
-## 2026-10-08: single-instance deploy restored
+### 2026-10-08: single-instance deploy restored
 
 Reverts the two-instance deploy topology from `9a4c20d` and `94f65e0`. Keeps every
 app-level change since, including the `ef33b49` token changes.
@@ -61,7 +95,7 @@ app-level change since, including the `ef33b49` token changes.
 - `app/serve.py` (drain on shutdown) stays in the repo with its tests, but the unit
   doesn't use it. Deploys end live calls again (see README, Deploy).
 
-### Server action required
+#### Server action required (obsolete)
 
 Run once, as root, on the server:
 
@@ -74,7 +108,7 @@ Run once, as root, on the server:
 4. If not already done for `ef33b49`: set the Exotel Voicebot URL to
    `wss://<voice domain>/ws/exotel/<EXOTEL_WS_TOKEN>`.
 
-## 2026-10-08: Exotel token as a path segment (`ef33b49`)
+### 2026-10-08: Exotel token as a path segment (`ef33b49`)
 
 - `/ws/exotel/{token}` accepted alongside `/ws/exotel?token=`, because Exotel's applet
   drops query strings. Both use a constant-time comparison.
@@ -82,13 +116,13 @@ Run once, as root, on the server:
   `dontlog`.
 - `scripts/seed_test_agent.py` for test calls before the Laravel integration.
 
-### Server action required
+#### Server action required (obsolete)
 
 - Exotel flow: Voicebot URL `wss://<voice domain>/ws/exotel/<EXOTEL_WS_TOKEN>`.
 - Re-copy `apache-webuzo.conf` and restart Apache. This is superseded by the entry
   above, which includes it.
 
-## 2026-10-08: two-instance zero-downtime deploy (`9a4c20d`, `94f65e0`), reverted
+### 2026-10-08: two-instance zero-downtime deploy (`9a4c20d`, `94f65e0`), reverted
 
 Two units (`sakhii-voice@8000`/`@8001`) behind an Apache balancer. Bootstrap was
 re-run on the server (its sudo rule names the `@` units), but the rule said
@@ -96,17 +130,17 @@ re-run on the server (its sudo rule names the `@` units), but the rule said
 at the sudo restart. The server was left on a `9a4c20d` release. Reverted by the first
 entry above.
 
-## 2026-10-07: Webuzo/Apache support (`33fba64`)
+### 2026-10-07: Webuzo/Apache support (`33fba64`)
 
 - `bootstrap.sh --no-webserver`, apt/dnf detection, Python 3.11+, a single
   `sakhii-voice.service` on 127.0.0.1:8000, and `deploy/apache-webuzo.conf`.
 
-### Server action required
+#### Server action required (obsolete)
 
 - First-time setup: `bootstrap.sh --no-webserver`, fill `shared/.env`, copy
   `apache-webuzo.conf`, restart Apache, and add the GitHub deploy secrets.
 
-## 2026-10-07: initial engine (`57d8793`)
+### 2026-10-07: initial engine (`57d8793`)
 
 Exotel Voicebot WebSocket, STT, LLM and TTS on Pipecat, with the Redis contract with
 Laravel and the GitHub Actions test-and-deploy pipeline.

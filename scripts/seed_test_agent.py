@@ -9,11 +9,11 @@ and fields are the ones the engine looks up.
 
 On the server (Redis + REDIS_KEY_PREFIX come from /opt/sakhii-voice/shared/.env):
 
-    cd /opt/sakhii-voice/current
-    sudo -u sakhii .venv/bin/python scripts/seed_test_agent.py --exophone 08047112233
-    sudo -u sakhii .venv/bin/python scripts/seed_test_agent.py --exophone 08047112233 \
+    cd /opt/sakhii-voice/app
+    sudo -u sakhii /opt/sakhii-voice/venv/bin/python scripts/seed_test_agent.py --exophone 08047112233
+    sudo -u sakhii /opt/sakhii-voice/venv/bin/python scripts/seed_test_agent.py --exophone 08047112233 \
         --provider-preset elevenlabs --voice-id <ElevenLabs voice_id>
-    sudo -u sakhii .venv/bin/python scripts/seed_test_agent.py --exophone 08047112233 --delete
+    sudo -u sakhii /opt/sakhii-voice/venv/bin/python scripts/seed_test_agent.py --exophone 08047112233 --delete
 """
 
 import argparse
