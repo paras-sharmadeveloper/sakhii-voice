@@ -109,8 +109,12 @@ if [ -f /etc/systemd/system/sakhii-voice.service ]; then
 fi
 install -m 644 "$HERE/sakhii-voice@.service" /etc/systemd/system/
 systemctl daemon-reload
-# Started by the first deploy, once a release exists.
 systemctl enable sakhii-voice@8000 sakhii-voice@8001
+# With a release already built (re-running bootstrap on a live server), start
+# them now; otherwise the first deploy starts them.
+if [ -x "$ROOT/current/.venv/bin/python" ]; then
+  systemctl restart sakhii-voice@8000 sakhii-voice@8001
+fi
 
 # SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000/8001.
 if command -v getenforce >/dev/null && [ "$(getenforce)" != Disabled ]; then

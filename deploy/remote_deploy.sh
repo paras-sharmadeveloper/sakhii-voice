@@ -34,21 +34,24 @@ healthy() {
 }
 
 SYSTEMCTL="$(command -v systemctl)"
+rollback() {
+  echo "!! $1, rolling back to $(basename "${PREVIOUS:-none}")"
+  if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
+    ln -sfn "$PREVIOUS" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
+    # -n: never prompt; if sudo isn't allowed this just fails.
+    sudo -n "$SYSTEMCTL" restart "sakhii-voice@$2" || true
+  fi
+  exit 1
+}
 for i in "${!PORTS[@]}"; do
   port="${PORTS[$i]}"
   if [ "$i" -gt 0 ]; then
     sleep "$REJOIN_SECS"
   fi
   echo ">> restarting sakhii-voice@$port (waits for its live calls to finish)"
-  sudo "$SYSTEMCTL" restart "sakhii-voice@$port"
-  if ! healthy "$port"; then
-    echo "!! sakhii-voice@$port unhealthy, rolling back"
-    if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
-      ln -sfn "$PREVIOUS" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
-      sudo "$SYSTEMCTL" restart "sakhii-voice@$port"
-    fi
-    exit 1
-  fi
+  sudo -n "$SYSTEMCTL" restart "sakhii-voice@$port" \
+    || rollback "could not restart sakhii-voice@$port (sudo rule from an older bootstrap? re-run deploy/bootstrap.sh)" "$port"
+  healthy "$port" || rollback "sakhii-voice@$port unhealthy" "$port"
 done
 
 # Keep the last 5 releases for manual rollback.
