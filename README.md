@@ -177,6 +177,10 @@ The agent is resolved in this order: `?agent_id=` on the Voicebot URL, then `age
 Exotel custom parameters, then the call's `:init` key, then the dialled ExoPhone, then the
 caller-id number. If nothing matches, the stream closes with code 1011.
 
+Exotel's Voicebot applet drops query parameters, so `?agent_id=` only works for tools
+like curl or the latency probe. On real calls, the agent comes from custom parameters,
+the `:init` key or the ExoPhone mapping.
+
 **Agent JSON** (`schema_version: 1`). Only `agent_id` and `models` are required; unknown
 fields are ignored:
 
@@ -283,8 +287,18 @@ agent. The keys have no expiry, so delete them when you're done.
 Use the native Voicebot applet. No SIP trunk is involved.
 
 1. In the call flow, add a **Voicebot** applet with URL
-   `wss://voice.YOURDOMAIN.com/ws/exotel?token=<EXOTEL_WS_TOKEN>`. To pin a specific
-   agent, add `&agent_id=42`. Keep the default 8 kHz.
+
+   ```
+   wss://voice.YOURDOMAIN.com/ws/exotel/<EXOTEL_WS_TOKEN>
+   ```
+
+   The token goes in the **path**. Exotel's applet drops query parameters, so
+   `/ws/exotel?token=...` reaches the engine without a token and is rejected with 403.
+   That form still works from curl, the latency probe and other tools. Keep the default
+   8 kHz.
+
+   Use a URL-safe token, e.g. `openssl rand -hex 24`. A `/` or `?` in the token would
+   break the path form. Both forms are checked with a constant-time comparison.
 2. Put a **Passthru** applet after the Voicebot, pointing at Laravel. When the Voicebot
    stream ends, Exotel continues the flow, and Laravel reads `sakhii:voice:call:{CallSid}`:
    - If `next_action = transfer`, Laravel returns the route to a **Connect** applet that
@@ -293,6 +307,28 @@ Use the native Voicebot applet. No SIP trunk is involved.
 
    This is how "Transfer to human agent" works: the engine speaks the hand-off line,
    writes `next_action`, then closes the stream.
+
+### Keeping the token out of logs
+
+The token is part of the URL, so any component that logs URLs can leak it.
+
+- **Engine:** never logs the token. uvicorn logs every WebSocket handshake at INFO with
+  the full path and query string. `app/redact.py` masks both forms before anything is
+  written: `"WebSocket /ws/exotel/***" [accepted]` and `?token=***`. The tests check
+  this against uvicorn's real log output, for good and bad tokens.
+- **Apache access log:** Apache writes the request line, including the token, unless
+  told not to. `deploy/apache-webuzo.conf` marks every `/ws/exotel` request with
+  `SetEnvIf ... dontlog`. That only takes effect if the vhost's `CustomLog` line ends in
+  `env=!dontlog`. Webuzo generates that line, so check the domain's vhost and add the
+  condition if your Webuzo version allows a custom log directive. Otherwise:
+  - restrict who can read the domain's access logs (root and Webuzo only);
+  - keep log rotation short;
+  - rotate `EXOTEL_WS_TOKEN` if the logs are ever shared or shipped elsewhere.
+- **Apache error log:** mod_proxy can include the backend URL, and so the token, when it
+  fails to reach the engine (e.g. both instances down). Treat it like the access log.
+- **Rotating the token:** set the new value in `/opt/sakhii-voice/shared/.env`, restart
+  both instances, then update the Voicebot URL in the Exotel flow. Calls fail with 403
+  between those two steps.
 
 ## Run locally
 

@@ -181,7 +181,7 @@ async def seed(args: argparse.Namespace) -> int:
         print(f"WARNING: {', '.join(missing)} not set in the engine env; the call will fail")
     print(f"\nCall the ExoPhone: 0{number[3:]}  ({number})")
     print("Its Exotel flow must route to the Voicebot applet at "
-          "wss://<your domain>/ws/exotel?token=<EXOTEL_WS_TOKEN>.")
+          "wss://<your domain>/ws/exotel/<EXOTEL_WS_TOKEN>.")
     return 0
 
 

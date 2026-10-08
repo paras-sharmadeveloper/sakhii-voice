@@ -178,3 +178,92 @@ async def test_time_limit_speaks_then_hangs_up(server):
             break
         await asyncio.sleep(0.1)
     assert state["end_reason"] == "max_duration"
+
+
+async def _greeted(url: str, call_sid: str) -> bool:
+    """Run a short call; True if the engine answered with audio."""
+    silence = base64.b64encode(b"\x00\x00" * 160).decode()
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"event": "connected"}))
+        await ws.send(_start(call_sid=call_sid))
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline:
+            await ws.send(json.dumps({"event": "media", "stream_sid": "ST1", "media": {"payload": silence}}))
+            try:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), 0.05))
+            except TimeoutError:
+                continue
+            if msg.get("event") == "media":
+                return True
+    return False
+
+
+async def test_token_as_path_segment(server):
+    """The form Exotel's Voicebot applet can use (it drops query strings)."""
+    port, r = server
+    assert await _greeted(f"ws://127.0.0.1:{port}/ws/exotel/secret", "CA123")
+    assert stub_providers.SPOKEN and "Ramesh ji" in stub_providers.SPOKEN[0]
+
+
+async def test_token_as_query_parameter_still_works(server):
+    port, _ = server
+    assert await _greeted(f"ws://127.0.0.1:{port}/ws/exotel?token=secret", "CA123")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ws/exotel",  # what Exotel sent before: no token at all
+        "/ws/exotel/nope",
+        "/ws/exotel/secre",
+        "/ws/exotel/secret-and-more",
+        "/ws/exotel/s%C3%A9cret",  # non-ASCII: a mismatch, not a server error
+        "/ws/exotel?token=",
+    ],
+)
+async def test_rejects_missing_or_bad_tokens(server, path):
+    port, _ = server
+    with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+        async with websockets.connect(f"ws://127.0.0.1:{port}{path}") as ws:
+            await ws.recv()
+    assert exc.value.response.status_code == 403
+
+
+async def test_token_never_reaches_the_logs(server):
+    """uvicorn logs every WebSocket handshake with its full path; ours and
+    theirs must show the token masked, for good and bad tokens alike."""
+    import logging
+
+    from loguru import logger
+
+    port, _ = server
+    lines: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    uv = logging.getLogger("uvicorn.error")
+    handler, old_level = Capture(), uv.level
+    uv.addHandler(handler)
+    uv.setLevel(logging.INFO)
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="DEBUG")
+    try:
+        assert await _greeted(f"ws://127.0.0.1:{port}/ws/exotel/secret", "CA123")
+        assert await _greeted(f"ws://127.0.0.1:{port}/ws/exotel?token=secret&agent_id=42", "CA123")
+        for bad in ("/ws/exotel/wrongtoken123", "/ws/exotel?token=wrongtoken456"):
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(f"ws://127.0.0.1:{port}{bad}") as ws:
+                    await ws.recv()
+        await asyncio.sleep(0.3)
+    finally:
+        uv.removeHandler(handler)
+        uv.setLevel(old_level)
+        logger.remove(sink)
+
+    handshakes = [line for line in lines if '"WebSocket ' in line]
+    assert len(handshakes) >= 4, lines
+    for secret in ("secret", "wrongtoken123", "wrongtoken456"):
+        assert not [line for line in lines if secret in line], f"{secret!r} leaked"
+    assert any("/ws/exotel/***" in line for line in handshakes)
+    assert any("token=***&agent_id=42" in line for line in handshakes)
