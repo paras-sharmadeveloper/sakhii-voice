@@ -65,6 +65,11 @@ def box(tmp_path):
     root = tmp_path / "opt"
     units = tmp_path / "units"
     units.mkdir()
+    sudoers = tmp_path / "sudoers.d"
+    sudoers.mkdir()
+    # Leftovers from the old GitHub Actions deploy.
+    (units / "sakhii-voice@.service").write_text("old")
+    (sudoers / "sakhii-voice").write_text("old rule")
 
     def run(script: str, *, remote=NEW, bad="", env_file="KEEP=me\n", existing_app=False):
         if env_file is not None:
@@ -87,6 +92,7 @@ def box(tmp_path):
             "SAKHII_ROOT": str(root),
             "PYTHON": str(bin_dir / "python3.12"),
             "UNIT_DIR": str(units),
+            "SUDOERS_DIR": str(sudoers),
             "HEALTH_TRIES": "2",
             "SRC": str(REPO),
             "FAKE_LOG": str(tmp_path / "calls.log"),
@@ -114,6 +120,8 @@ def test_setup_replaces_old_units_and_keeps_env(box):
     assert (units / "sakhii-voice.service").read_text() == (REPO / "deploy/sakhii-voice.service").read_text()
     assert (root / "shared" / ".env").read_text() == "KEEP=me\n"
     assert not (root / "releases").exists()
+    assert not (units / "sakhii-voice@.service").exists()
+    assert not (units.parent / "sudoers.d" / "sakhii-voice").exists()
     assert "sakhii-voice healthy" in proc.stdout
     # Code and deps are ready before the old units are stopped.
     first_stop = next(i for i, c in enumerate(calls) if c.startswith("systemctl disable"))

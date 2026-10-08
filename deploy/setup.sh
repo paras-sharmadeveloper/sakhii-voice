@@ -44,8 +44,7 @@ echo ">> removing old units"
 for unit in sakhii-voice.service sakhii-voice@8000.service sakhii-voice@8001.service; do
   systemctl disable --now "$unit" >/dev/null 2>&1 || true
 done
-rm -f /etc/systemd/system/sakhii-voice.service /etc/systemd/system/sakhii-voice@.service
-rm -f /etc/sudoers.d/sakhii-voice
+rm -f "$UNIT_DIR/sakhii-voice.service" "$UNIT_DIR/sakhii-voice@.service" "$SUDOERS_FILE"
 systemctl daemon-reload
 systemctl reset-failed 'sakhii-voice*' >/dev/null 2>&1 || true
 

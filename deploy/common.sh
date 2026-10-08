@@ -8,7 +8,9 @@ PYTHON="${PYTHON:-/bin/python3.12}"
 REPO_URL="${REPO_URL:-https://github.com/paras-sharmadeveloper/sakhii-voice.git}"
 BRANCH="${BRANCH:-main}"
 UNIT=sakhii-voice
-UNIT_FILE="${UNIT_DIR:-/etc/systemd/system}/$UNIT.service"
+UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+UNIT_FILE="$UNIT_DIR/$UNIT.service"
+SUDOERS_FILE="${SUDOERS_DIR:-/etc/sudoers.d}/sakhii-voice"
 HEALTH_URL=http://127.0.0.1:8000/healthz
 HEALTH_TRIES="${HEALTH_TRIES:-30}"
 
