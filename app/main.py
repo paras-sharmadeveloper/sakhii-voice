@@ -31,6 +31,9 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
+# Live calls in this process; app.serve waits for it to reach 0 on shutdown.
+active_calls = 0
+
 
 @app.get("/healthz")
 async def healthz():
@@ -72,7 +75,11 @@ async def exotel(websocket: WebSocket):
         custom = {k: v[0] for k, v in parse_qs(custom).items()}
     agent_id = websocket.query_params.get("agent_id") or custom.get("agent_id")
 
+    global active_calls
+    active_calls += 1
     try:
         await run_call(websocket, call, agent_id)
     except Exception:
         logger.exception("Call {} crashed", call.call_id)
+    finally:
+        active_calls -= 1

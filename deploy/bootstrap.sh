@@ -96,16 +96,23 @@ fi
 SYSTEMCTL="$(command -v systemctl)"
 # The deploy user may restart only the engine.
 cat > /etc/sudoers.d/sakhii-voice <<SUDO
-sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice, $SYSTEMCTL start sakhii-voice
+sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice@8000, $SYSTEMCTL restart sakhii-voice@8001, $SYSTEMCTL start sakhii-voice@8000, $SYSTEMCTL start sakhii-voice@8001
 SUDO
 chmod 440 /etc/sudoers.d/sakhii-voice
 visudo -cf /etc/sudoers.d/sakhii-voice
 
-install -m 644 "$HERE/sakhii-voice.service" /etc/systemd/system/
+# Servers bootstrapped before the two-instance setup ran a single
+# sakhii-voice.service on 8000; retire it (this ends its live calls).
+if [ -f /etc/systemd/system/sakhii-voice.service ]; then
+  systemctl disable --now sakhii-voice.service || true
+  rm -f /etc/systemd/system/sakhii-voice.service
+fi
+install -m 644 "$HERE/sakhii-voice@.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable sakhii-voice
+# Started by the first deploy, once a release exists.
+systemctl enable sakhii-voice@8000 sakhii-voice@8001
 
-# SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000.
+# SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000/8001.
 if command -v getenforce >/dev/null && [ "$(getenforce)" != Disabled ]; then
   setsebool -P httpd_can_network_connect 1
 fi
@@ -132,8 +139,8 @@ if [ "$WEBSERVER" = 1 ]; then
   fi
   nginx -t && systemctl reload nginx
 else
-  echo ">> --no-webserver: skipped nginx and certbot. Proxy wss://<domain>/ws/exotel"
-  echo "   to ws://127.0.0.1:8000/ws/exotel (deploy/apache-webuzo.conf)."
+  echo ">> --no-webserver: skipped nginx and certbot. Balance wss://<domain>/ws/exotel"
+  echo "   across ws://127.0.0.1:8000 and :8001 (deploy/apache-webuzo.conf)."
 fi
 
 echo ">> Bootstrap done. Add the GitHub secrets and push to main to deploy."

@@ -2,13 +2,18 @@
 # Runs on the server as the sakhii user (invoked by the GitHub workflow):
 #   bash remote_deploy.sh <release-dir>
 # Builds the venv for the uploaded release, points `current` at it, then
-# restarts the engine. If it doesn't come up healthy, `current` goes back to
-# the previous release.
+# restarts the two instances one at a time, so one is always taking calls.
+# If an instance doesn't come up healthy, `current` goes back to the
+# previous release.
 set -euo pipefail
 
 ROOT=/opt/sakhii-voice
 RELEASE="${1:?release dir}"
-PORT=8000
+PORTS=(8000 8001)
+# Apache keeps a member that refused a connection out of rotation for its
+# `retry` seconds (deploy/apache-webuzo.conf: retry=5). Wait that out after
+# an instance is back, before taking the other one down.
+REJOIN_SECS=6
 UV="$HOME/.local/bin/uv"
 # Interpreter chosen by bootstrap.sh (Python 3.11+).
 PYTHON="$(cat "$ROOT/shared/python" 2>/dev/null || echo python3.12)"
@@ -29,16 +34,22 @@ healthy() {
 }
 
 SYSTEMCTL="$(command -v systemctl)"
-echo ">> restarting sakhii-voice (waits for live calls to finish)"
-sudo "$SYSTEMCTL" restart sakhii-voice
-if ! healthy "$PORT"; then
-  echo "!! sakhii-voice unhealthy, rolling back"
-  if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
-    ln -sfn "$PREVIOUS" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
-    sudo "$SYSTEMCTL" restart sakhii-voice
+for i in "${!PORTS[@]}"; do
+  port="${PORTS[$i]}"
+  if [ "$i" -gt 0 ]; then
+    sleep "$REJOIN_SECS"
   fi
-  exit 1
-fi
+  echo ">> restarting sakhii-voice@$port (waits for its live calls to finish)"
+  sudo "$SYSTEMCTL" restart "sakhii-voice@$port"
+  if ! healthy "$port"; then
+    echo "!! sakhii-voice@$port unhealthy, rolling back"
+    if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
+      ln -sfn "$PREVIOUS" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
+      sudo "$SYSTEMCTL" restart "sakhii-voice@$port"
+    fi
+    exit 1
+  fi
+done
 
 # Keep the last 5 releases for manual rollback.
 ls -1dt "$ROOT"/releases/*/ | tail -n +6 | xargs -r rm -rf

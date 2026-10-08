@@ -44,6 +44,9 @@ class Settings(BaseSettings):
 
     llm_max_tokens: int = 220
     default_max_call_secs: int = 600
+    # On shutdown, how long live calls may continue (app/serve.py). Longer
+    # than the max call length, so a deploy never cuts a call.
+    drain_timeout_secs: int = 615
 
 
 @lru_cache

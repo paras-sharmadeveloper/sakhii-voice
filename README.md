@@ -19,6 +19,7 @@ Stack: Python 3.12 (3.11+ supported), FastAPI, uvicorn, Pipecat 1.12 (pinned), R
 ```
 app/
   main.py            FastAPI app: /ws/exotel, /healthz (public as /health)
+  serve.py           runs one instance; on SIGTERM closes its port and drains live calls
   pipeline.py        one call: transport, turn detection, greeting, limits, logging
   agent_config.py    the agent JSON Laravel writes (mirrors the Agent Builder tabs)
   prompt.py          system prompt, {placeholders}, pronunciation rules
@@ -299,7 +300,7 @@ Use the native Voicebot applet. No SIP trunk is involved.
 uv venv -p 3.12 .venv && source .venv/bin/activate
 uv pip install -r pyproject.toml --extra dev
 cp .env.example .env            # add API keys
-uvicorn app.main:app --port 8000 --loop uvloop
+python -m app.serve --port 8000          # or: uvicorn app.main:app --port 8000 (no call draining)
 pytest                          # needs a local redis-server for the e2e tests
 ```
 
@@ -312,14 +313,19 @@ python scripts/latency_probe.py --url "ws://127.0.0.1:8000/ws/exotel?token=$EXOT
 
 ## Deploy
 
-The engine runs as one systemd service, `sakhii-voice`. It listens on
-**127.0.0.1:8000 only**, so the web server already on the box is the only public
-entry point:
+The engine runs as two systemd instances, `sakhii-voice@8000` and `sakhii-voice@8001`.
+They listen on **127.0.0.1 only**, and the web server already on the box balances
+calls across them:
 
 ```
 Exotel ──wss://voice.YOURDOMAIN.com/ws/exotel──▶ Apache (Webuzo, :443, Let's Encrypt)
-                                                   └─ws://127.0.0.1:8000/ws/exotel──▶ sakhii-voice
+                                                   └─ mod_proxy_balancer ─┬─▶ 127.0.0.1:8000  sakhii-voice@8000
+                                                                          └─▶ 127.0.0.1:8001  sakhii-voice@8001
 ```
+
+Each instance is one asyncio process (`python -m app.serve`) handling many calls at once.
+For more CPU cores, add instances: `sakhii-voice@8002` plus a `BalancerMember` line, the
+port in `remote_deploy.sh`, and the sudoers line.
 
 ### Pipeline
 
@@ -329,14 +335,32 @@ When a push to `main` passes, it deploys over SSH as the `sakhii` user:
 1. The code is uploaded to `/opt/sakhii-voice/releases/<timestamp>-<sha>/`, and its
    own `.venv` is built there with the Python that bootstrap picked
    (`/opt/sakhii-voice/shared/python`).
-2. `/opt/sakhii-voice/current` is switched to the new release, and `sakhii-voice` is
-   restarted.
-3. The engine has to pass the health check within 30 s. If it doesn't, `current` goes
-   back to the previous release and the deploy fails. The last 5 releases are kept.
+2. `/opt/sakhii-voice/current` is switched to the new release.
+3. The instances restart one at a time, with no dropped or refused calls:
+   - On SIGTERM, `app.serve` closes the instance's port at once. Apache's connect gets
+     "connection refused", the balancer takes that member out of rotation for `retry=5`
+     seconds, and new calls go to the other instance.
+   - The old process keeps its live calls running until they end, up to
+     `DRAIN_TIMEOUT_SECS` (615 s, just over the 600 s max call). Then it exits and
+     systemd starts the new release on that port.
+   - The deploy waits for `/healthz` on the restarted port, then 6 s more so Apache's
+     retry window has passed and the member is back in rotation. Only then does it
+     restart the other instance.
+4. If an instance doesn't pass the health check within 30 s, `current` goes back to the
+   previous release and the deploy fails. The last 5 releases are kept.
 
-**Restarts refuse new calls while live calls finish.** On restart, the old process stops
-accepting connections and lets live calls finish, for up to the max call length
-(10 min). Calls arriving in that window are refused. Deploy outside busy hours.
+A deploy can take as long as the longest live call, up to about 10 minutes per
+instance. This is expected.
+
+Plain uvicorn isn't used: on shutdown it closes every open WebSocket (code 1012), which
+would cut live calls. Its `--workers` mode can't drain either, because its parent process
+keeps the port open while the workers stop.
+
+Tested with Apache 2.4.56 and `deploy/apache-webuzo.conf` in front of two real
+instances, restarting each in turn under load:
+- every new call was answered;
+- no new call reached the draining instance;
+- every live call stayed connected until it ended.
 
 ### One-time server setup: AlmaLinux / RHEL with Webuzo (Apache)
 
@@ -363,8 +387,9 @@ certbot.
    - creates the `sakhii` user with the deploy key;
    - installs uv;
    - lays out `/opt/sakhii-voice/{releases,shared}`;
-   - installs and enables `sakhii-voice.service`;
-   - allows `sakhii` to restart only that service;
+   - installs and enables `sakhii-voice@8000` and `sakhii-voice@8001`, replacing a
+     single `sakhii-voice.service` from an older bootstrap;
+   - allows `sakhii` to restart only those two units;
    - if SELinux is on, sets `httpd_can_network_connect` so Apache may proxy to
      127.0.0.1:8000.
 
@@ -378,11 +403,13 @@ certbot.
    ```bash
    mkdir -p /var/webuzo-data/apache2/custom/domains
    cp deploy/apache-webuzo.conf /var/webuzo-data/apache2/custom/domains/voice.YOURDOMAIN.com.conf
-   /usr/local/apps/apache2/bin/httpd -M | grep -E 'proxy_(http|wstunnel)'   # both must be listed
+   /usr/local/apps/apache2/bin/httpd -M | grep -E 'proxy|lbmethod|slotmem'
+   # needs: proxy, proxy_http, proxy_wstunnel, proxy_balancer, lbmethod_byrequests, slotmem_shm
    ```
 
-   Then rebuild/restart Apache from the Webuzo panel. The rules proxy `/ws/exotel`
-   with `mod_proxy_wstunnel` and `/health` over HTTP, with `ProxyTimeout 600`.
+   Then rebuild/restart Apache from the Webuzo panel. The rules balance `/ws/exotel`
+   (via `mod_proxy_wstunnel`) and `/health` (HTTP) across 127.0.0.1:8000 and :8001,
+   with `ProxyTimeout 600`.
 
 5. Add the GitHub secrets below, then push to `main`. Check with
    `curl https://voice.YOURDOMAIN.com/health`, which should return `{"ok":true}`.
@@ -411,11 +438,12 @@ there if you want a manual approval step before each deploy.
 
 ### On the server
 
-- `systemctl status sakhii-voice`
-- `journalctl -u sakhii-voice -f`
-- `curl -s 127.0.0.1:8000/healthz`
+- `systemctl status 'sakhii-voice@*'`
+- `journalctl -u 'sakhii-voice@*' -f`
+- `curl -s 127.0.0.1:8000/healthz; curl -s 127.0.0.1:8001/healthz`
 - Roll back by hand: `ln -sfn /opt/sakhii-voice/releases/<older> /opt/sakhii-voice/current`,
-  then `systemctl restart sakhii-voice`.
+  then restart `sakhii-voice@8000`, wait for it to be healthy, then restart
+  `sakhii-voice@8001`.
 
 For the lowest provider round trips, host in Mumbai (e.g. AWS `ap-south-1`). Sarvam and
 Exotel are in India, and every hop to Europe or the US adds 100–250 ms per turn.
