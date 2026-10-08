@@ -4,6 +4,34 @@ Any change that needs a step on the server goes here, under
 **Server action required**. Deploys are manual (`deploy/update.sh`), so a
 server step that isn't listed here won't happen.
 
+## 2026-10-09: Laravel publishes agents to Redis and imports engine calls
+
+The Laravel backend writes `sakhii:voice:agent:{id}` and `sakhii:voice:number:{+91…}`
+(see "Redis contract with Laravel" in the README) when an agent is deployed, switched on
+or off, deleted, or gets a new number. It also takes an account off the engine when its
+minutes run out. Finished engine calls become call logs in Laravel: Enquiries, billed
+minutes, email, Zapier and the post-call webhook. No engine code changed.
+
+### Server action required
+
+1. Laravel `.env` on the server: `SAKHII_VOICE_ENABLED=true`, pointing at the Redis the
+   engine uses (default: `REDIS_HOST`/`REDIS_PORT`, DB 0; override with
+   `SAKHII_VOICE_REDIS_HOST`/`_PORT`/`_DB`/`_PASSWORD`). Laravel needs the PHP `redis`
+   extension (`php -m | grep redis`) or `REDIS_CLIENT=predis` with predis installed.
+2. Run `php artisan config:clear && php artisan sakhii-voice:publish` in the Laravel app.
+   It prints the key prefix Laravel uses.
+3. Set `REDIS_KEY_PREFIX` in `/opt/sakhii-voice/shared/.env` to that prefix (for example
+   `laravel-database-`), then `sudo bash /opt/sakhii-voice/app/deploy/update.sh`.
+4. To move an ExoPhone to the engine: in its Exotel flow, use the Voicebot applet with
+   `wss://voice.sakhii.io/ws/exotel/<EXOTEL_WS_TOKEN>`. Numbers whose flows don't route
+   to the engine keep working as before.
+5. Engine calls reach Enquiries through `php artisan sakhii-voice:sync-calls`, which is
+   scheduled every minute. The server's Laravel cron (`* * * * * php artisan schedule:run`)
+   must be running; it already runs `quota:check` and the other jobs. Each call is
+   imported once, from the engine's `sakhii:voice:events` stream (consumer group
+   `laravel`). Calls answered before step 2 are imported too, as long as they're still
+   in the stream.
+
 ## 2026-10-08: manual deploy replaces GitHub Actions deploys
 
 - GitHub Actions now only runs the tests (`.github/workflows/test.yml`). Removed: the
