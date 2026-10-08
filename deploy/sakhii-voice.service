@@ -1,0 +1,28 @@
+[Unit]
+Description=Sakhii voice engine (Exotel -> STT -> LLM -> TTS)
+After=network-online.target redis.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=sakhii
+WorkingDirectory=/opt/sakhii-voice/current
+EnvironmentFile=/opt/sakhii-voice/shared/.env
+# Loopback only: the web server (Apache/nginx) is the public entry point.
+# Calls never move between workers (each call is one WebSocket on one
+# worker) and shared state lives in Redis; one worker per CPU core.
+ExecStart=/opt/sakhii-voice/current/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 4 \
+    --loop uvloop --http httptools --ws websockets \
+    --ws-ping-interval 20 --ws-ping-timeout 20 \
+    --timeout-graceful-shutdown 600 --no-access-log
+# On stop, uvicorn closes its port and its open WebSockets (code 1012), so a
+# restart ends live calls and refuses new ones for the few seconds it takes
+# to come back. Deploy outside busy hours.
+KillSignal=SIGTERM
+TimeoutStopSec=620
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

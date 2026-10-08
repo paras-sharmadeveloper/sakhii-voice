@@ -94,29 +94,35 @@ fi
 # --- service ----------------------------------------------------------------
 
 SYSTEMCTL="$(command -v systemctl)"
-# The deploy user may restart only the engine.
+# The deploy user may restart/start only the engine; remote_deploy.sh checks
+# this rule before every deploy.
 cat > /etc/sudoers.d/sakhii-voice <<SUDO
-sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice@8000, $SYSTEMCTL restart sakhii-voice@8001, $SYSTEMCTL start sakhii-voice@8000, $SYSTEMCTL start sakhii-voice@8001
+sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice, $SYSTEMCTL start sakhii-voice
 SUDO
 chmod 440 /etc/sudoers.d/sakhii-voice
 visudo -cf /etc/sudoers.d/sakhii-voice
 
-# Servers bootstrapped before the two-instance setup ran a single
-# sakhii-voice.service on 8000; retire it (this ends its live calls).
-if [ -f /etc/systemd/system/sakhii-voice.service ]; then
-  systemctl disable --now sakhii-voice.service || true
-  rm -f /etc/systemd/system/sakhii-voice.service
-fi
-install -m 644 "$HERE/sakhii-voice@.service" /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable sakhii-voice@8000 sakhii-voice@8001
-# With a release already built (re-running bootstrap on a live server), start
-# them now; otherwise the first deploy starts them.
-if [ -x "$ROOT/current/.venv/bin/python" ]; then
-  systemctl restart sakhii-voice@8000 sakhii-voice@8001
+# Retire the two-instance units if an earlier bootstrap (9a4c20d/94f65e0)
+# installed them. Stopping them ends their live calls.
+if [ -f /etc/systemd/system/sakhii-voice@.service ]; then
+  systemctl disable --now sakhii-voice@8000 sakhii-voice@8001 || true
+  rm -f /etc/systemd/system/sakhii-voice@.service
+  systemctl reset-failed 'sakhii-voice@*' 2>/dev/null || true
 fi
 
-# SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000/8001.
+install -m 644 "$HERE/sakhii-voice.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable sakhii-voice
+# Start it if a release is already built. If it's already running, leave it:
+# re-running bootstrap must not cut live calls; the next deploy restarts it
+# with this unit file.
+if [ -x "$ROOT/current/.venv/bin/uvicorn" ]; then
+  systemctl is-active --quiet sakhii-voice || systemctl start sakhii-voice
+else
+  echo ">> No release yet; the first deploy starts sakhii-voice."
+fi
+
+# SELinux (RHEL-family): let the web server proxy to 127.0.0.1:8000.
 if command -v getenforce >/dev/null && [ "$(getenforce)" != Disabled ]; then
   setsebool -P httpd_can_network_connect 1
 fi
@@ -143,8 +149,8 @@ if [ "$WEBSERVER" = 1 ]; then
   fi
   nginx -t && systemctl reload nginx
 else
-  echo ">> --no-webserver: skipped nginx and certbot. Balance wss://<domain>/ws/exotel"
-  echo "   across ws://127.0.0.1:8000 and :8001 (deploy/apache-webuzo.conf)."
+  echo ">> --no-webserver: skipped nginx and certbot. Proxy wss://<domain>/ws/exotel"
+  echo "   and /ws/exotel/ to ws://127.0.0.1:8000 (deploy/apache-webuzo.conf)."
 fi
 
 echo ">> Bootstrap done. Add the GitHub secrets and push to main to deploy."
