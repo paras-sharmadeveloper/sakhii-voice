@@ -368,11 +368,12 @@ GitHub Actions (`.github/workflows/deploy.yml`) runs the tests on every push and
 When a push to `main` passes, it deploys over SSH as the `sakhii` user, using
 `deploy/remote_deploy.sh`:
 
-1. **Preflight:** checks that `sakhii` may run `sudo systemctl restart sakhii-voice`
-   without a password. It uses `sudo -l`, falling back to a no-op `systemctl start` on
-   the running service, because some sudo setups won't list rules without a password.
-   If not allowed, it stops before changing anything and prints the sudo rules and the
-   exact `bootstrap.sh` command to run on the server. The current release stays live.
+1. **Preflight:** checks with `sudo -n -l` that `sakhii` may run
+   `sudo systemctl restart sakhii-voice` without a password. If not, it stops before
+   changing anything and prints the server's sudo rules and the exact `bootstrap.sh`
+   command to run on the server. The current release stays live. (The sudoers rule
+   lists both `/usr/bin/systemctl` and `/bin/systemctl`, because sudo matches the path
+   as written.)
 2. The code is uploaded to `/opt/sakhii-voice/releases/<timestamp>-<sha>/`, and its
    own `.venv` is built there with the Python that bootstrap picked
    (`/opt/sakhii-voice/shared/python`).

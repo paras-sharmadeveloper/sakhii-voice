@@ -15,13 +15,16 @@ app-level change since, including the `ef33b49` token changes.
   only. `deploy/sakhii-voice@.service` is removed.
 - `deploy/remote_deploy.sh` restarts `sakhii-voice` and health-checks
   `127.0.0.1:8000/healthz`. It rolls back `current` if the restart or the health check
-  fails. Before building or switching anything, it checks that
-  `sudo -n systemctl restart sakhii-voice` is allowed. It uses `sudo -n -l`, falling
-  back to `sudo -n systemctl start sakhii-voice` (same sudoers rule, no-op on a running
-  service), because on this server `sudo -n -l` was refused while the same NOPASSWD
-  restart had worked hours earlier, most likely sudo's `listpw` default.
-  If neither is allowed, it fails early, prints the sudo rules and the exact
-  `bootstrap.sh` command to run, and leaves the live release untouched.
+  fails. Before building or switching anything, it checks with `sudo -n -l` that
+  `sudo -n systemctl restart sakhii-voice` is allowed. If not, it fails early, prints
+  the server's sudo rules and the exact `bootstrap.sh` command to run, and leaves the
+  live release untouched.
+- **Fixed the cause of the failed deploys:** a `systemctl` path mismatch. sudo matches
+  the command path as written. Bootstrap, run via `sudo bash` (secure_path, `/bin`
+  first), wrote `/bin/systemctl` into the rule, while the deploy user ran
+  `/usr/bin/systemctl`. On AlmaLinux these are the same file, but sudo still refused.
+  Bootstrap now allows every spelling that exists (`/usr/bin/systemctl`,
+  `/bin/systemctl`), and the deploy uses the real path (`readlink -f`).
 - `deploy/bootstrap.sh`:
   - the sudo rule allows only `systemctl restart|start sakhii-voice`;
   - it stops, disables and removes `sakhii-voice@8000`/`@8001` if present, then
@@ -66,10 +69,11 @@ Run once, as root, on the server:
 
 ## 2026-10-08: two-instance zero-downtime deploy (`9a4c20d`, `94f65e0`), reverted
 
-Two units (`sakhii-voice@8000`/`@8001`) behind an Apache balancer. The server steps
-(re-run bootstrap, balancer config) were never performed. Every deploy failed at the
-sudo restart, and the server stayed on the single `sakhii-voice.service`. Reverted by
-the first entry above.
+Two units (`sakhii-voice@8000`/`@8001`) behind an Apache balancer. Bootstrap was
+re-run on the server (its sudo rule names the `@` units), but the rule said
+`/bin/systemctl` while the deploy called `/usr/bin/systemctl`, so every deploy failed
+at the sudo restart. The server was left on a `9a4c20d` release. Reverted by the first
+entry above.
 
 ## 2026-10-07: Webuzo/Apache support (`33fba64`)
 

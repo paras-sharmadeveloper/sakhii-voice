@@ -93,11 +93,19 @@ fi
 
 # --- service ----------------------------------------------------------------
 
-SYSTEMCTL="$(command -v systemctl)"
 # The deploy user may restart/start only the engine; remote_deploy.sh checks
-# this rule before every deploy.
+# this rule before every deploy. sudo matches the command path as written,
+# and on RHEL-family /bin is a symlink to /usr/bin: root under `sudo bash`
+# (secure_path, /bin first) finds /bin/systemctl while the deploy user finds
+# /usr/bin/systemctl. Allow every spelling that exists, plus the real path.
+SUDO_CMDS=""
+for path in $( { readlink -f "$(command -v systemctl)"; ls -d /usr/bin/systemctl /bin/systemctl 2>/dev/null; } | sort -u); do
+  for verb in restart start; do
+    SUDO_CMDS="${SUDO_CMDS:+$SUDO_CMDS, }$path $verb sakhii-voice"
+  done
+done
 cat > /etc/sudoers.d/sakhii-voice <<SUDO
-sakhii ALL=(root) NOPASSWD: $SYSTEMCTL restart sakhii-voice, $SYSTEMCTL start sakhii-voice
+sakhii ALL=(root) NOPASSWD: $SUDO_CMDS
 SUDO
 chmod 440 /etc/sudoers.d/sakhii-voice
 visudo -cf /etc/sudoers.d/sakhii-voice

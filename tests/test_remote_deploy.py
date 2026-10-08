@@ -15,13 +15,12 @@ GNUBIN = Path("/opt/homebrew/opt/coreutils/libexec/gnubin")
 
 FAKES = {
     # sudo -n -l <cmd>  -> allowed?   sudo -n <cmd> -> run it (logged)
-    # FAKE_LIST_ALLOWED=0 mimics servers where `sudo -l` wants a password even
-    # though the NOPASSWD command itself runs.
     "sudo": """#!/usr/bin/env bash
 [ "$1" = -n ] && shift
 if [ "$1" = -l ]; then
-  [ "$FAKE_SUDO_ALLOWED" = 1 ] && [ "$FAKE_LIST_ALLOWED" != 0 ] && exit 0
-  echo "sudo: a password is required" >&2; exit 1
+  [ "$FAKE_SUDO_ALLOWED" = 1 ] && exit 0
+  [ -z "$2" ] && { echo "User sakhii may run: (root) NOPASSWD: /bin/systemctl restart other"; exit 0; }
+  exit 1
 fi
 [ "$FAKE_SUDO_ALLOWED" = 1 ] || { echo "sudo: a password is required" >&2; exit 1; }
 "$@"
@@ -69,7 +68,7 @@ def server(tmp_path):
         (rel / "pyproject.toml").write_text("")
     (root / "current").symlink_to(old)
 
-    def run(*, allowed=True, listable=True, restart_ok=True, healthy=True):
+    def run(*, allowed=True, restart_ok=True, healthy=True):
         env = {
             **os.environ,
             "PATH": os.pathsep.join(p for p in (str(bin_dir), gnu, os.environ["PATH"]) if p),
@@ -78,7 +77,6 @@ def server(tmp_path):
             "HEALTH_TRIES": "2",
             "FAKE_LOG": str(tmp_path / "calls.log"),
             "FAKE_SUDO_ALLOWED": "1" if allowed else "0",
-            "FAKE_LIST_ALLOWED": "1" if listable else "0",
             "FAKE_RESTART_OK": "1" if restart_ok else "0",
             "FAKE_HEALTHY": "1" if healthy else "0",
         }
@@ -104,12 +102,13 @@ def test_preflight_fails_early_without_touching_current(server):
     proc, current, calls = run(allowed=False)
     assert proc.returncode == 1
     assert current == "20260101000000-old"
-    assert calls == []  # nothing started or restarted
+    assert calls == []  # nothing restarted
     assert not (new / ".venv").exists()  # nothing built
     out = proc.stdout
     assert f"sudo bash {new}/deploy/bootstrap.sh --no-webserver" in out
     assert "20260101000000-old is still live" in out
-    assert "sudo -n -l reports:" in out
+    # The server's actual rules are printed, so a failed deploy log shows them.
+    assert "sudo -n -l reports:" in out and "/bin/systemctl restart other" in out
 
 
 def test_refused_restart_rolls_back(server):
@@ -128,13 +127,3 @@ def test_unhealthy_engine_rolls_back(server):
     assert "unhealthy on 127.0.0.1:8000, rolling back" in proc.stdout
     assert calls == ["systemctl restart sakhii-voice", "systemctl restart sakhii-voice"]
 
-
-def test_preflight_passes_when_only_sudo_l_wants_a_password(server):
-    """What the real server does: `sudo -n -l <cmd>` asks for a password, but
-    the NOPASSWD rule lets the command itself run. The `start` probe (no-op on
-    a running service) proves the rule, and the deploy goes through."""
-    run, new = server
-    proc, current, calls = run(listable=False)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert current == new.name
-    assert calls == ["systemctl start sakhii-voice", "systemctl restart sakhii-voice"]

@@ -13,20 +13,16 @@ PORT=8000
 UNIT=sakhii-voice
 UV="${UV:-$HOME/.local/bin/uv}"
 HEALTH_TRIES="${HEALTH_TRIES:-30}"
-SYSTEMCTL="$(command -v systemctl)"
+# sudo matches the command path as written, and /bin/systemctl vs
+# /usr/bin/systemctl differs by PATH. Use the real path; bootstrap.sh
+# allows every spelling.
+SYSTEMCTL="$(readlink -f "$(command -v systemctl)")"
 # Interpreter chosen by bootstrap.sh (Python 3.11+).
 PYTHON="$(cat "$ROOT/shared/python" 2>/dev/null || echo python3.12)"
 
 # Preflight, before anything changes: may we restart the service without a
-# password? `sudo -l <cmd>` checks the rule without running anything, but on
-# some servers (sudo's listpw default) listing itself wants a password even
-# though the NOPASSWD command runs fine. So fall back to `start`, which is in
-# the same sudoers rule and does nothing to a service that's already running.
-can_restart() {
-  sudo -n -l "$SYSTEMCTL" restart "$UNIT" >/dev/null 2>&1 && return 0
-  sudo -n "$SYSTEMCTL" start "$UNIT" >/dev/null 2>&1
-}
-if ! can_restart; then
+# password? (`sudo -l <cmd>` checks the rule without running the command.)
+if ! sudo -n -l "$SYSTEMCTL" restart "$UNIT" >/dev/null 2>&1; then
   echo "!! sudo -n -l reports:"
   sudo -n -l 2>&1 | head -20 | sed 's/^/!!   /' || true
   echo "!! The sakhii user may not run 'sudo $SYSTEMCTL restart $UNIT'."
