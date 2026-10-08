@@ -368,19 +368,21 @@ GitHub Actions (`.github/workflows/deploy.yml`) runs the tests on every push and
 When a push to `main` passes, it deploys over SSH as the `sakhii` user, using
 `deploy/remote_deploy.sh`:
 
-1. **Preflight:** checks with `sudo -n -l` that `sakhii` may run
-   `sudo systemctl restart sakhii-voice` without a password. If not, it stops before
-   changing anything and prints the server's sudo rules and the exact `bootstrap.sh`
-   command to run on the server. The current release stays live. (The sudoers rule
-   lists both `/usr/bin/systemctl` and `/bin/systemctl`, because sudo matches the path
-   as written.)
+1. **Preflight:** reads the server's sudo rule (`sudo -n -l`) and restarts exactly
+   what it allows, with the `systemctl` path as the rule spells it:
+   - `sakhii-voice`: the single unit on 8000;
+   - `sakhii-voice@<port>`: each instance in turn, if the server still has an older
+     two-instance bootstrap.
+
+   If there's no rule at all, it stops before changing anything and prints the rules
+   and the exact `bootstrap.sh` command to run. The current release stays live.
 2. The code is uploaded to `/opt/sakhii-voice/releases/<timestamp>-<sha>/`, and its
    own `.venv` is built there with the Python that bootstrap picked
    (`/opt/sakhii-voice/shared/python`).
-3. `/opt/sakhii-voice/current` is switched to the new release, and `sakhii-voice` is
+3. `/opt/sakhii-voice/current` is switched to the new release, and the unit(s) are
    restarted.
-4. The engine must answer `127.0.0.1:8000/healthz` within 30 s. If the restart fails
-   or the health check does, `current` goes back to the previous release and the deploy
+4. Each restarted unit must answer `/healthz` on its port within 30 s. If a restart or
+   health check fails, `current` goes back to the previous release and the deploy
    fails. The last 5 releases are kept.
 
 **A deploy ends live calls.** On restart, uvicorn closes its open WebSockets, and new

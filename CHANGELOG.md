@@ -6,6 +6,27 @@ Apache/nginx config, bootstrap steps) must list the manual server steps under
 cannot change root-owned server config. Without these steps the deploy fails or
 misroutes calls.
 
+## 2026-10-08: deploy restarts whatever the server's sudo rule allows
+
+`deploy/remote_deploy.sh` no longer assumes a unit layout. It reads `sudo -n -l` and
+restarts exactly the units that rule allows, with the `systemctl` path spelled the
+way the rule spells it:
+- `restart sakhii-voice`: the single unit, health check on 8000;
+- `restart sakhii-voice@<port>`: each instance in turn, with a health check on each
+  port.
+
+This makes deploys work again on the current server, whose rule is the two-instance
+one (`/bin/systemctl restart sakhii-voice@8000/@8001`), with no root step. Rollback
+and the "no rule at all" early exit are unchanged.
+
+### Server action required
+
+None for deploys to work.
+
+Optional, to move the server to the single-instance layout described below: run that
+entry's steps when convenient. They end live calls. Deploys keep working before and
+after.
+
 ## 2026-10-08: single-instance deploy restored
 
 Reverts the two-instance deploy topology from `9a4c20d` and `94f65e0`. Keeps every

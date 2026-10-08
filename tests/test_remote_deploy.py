@@ -1,10 +1,10 @@
-"""deploy/remote_deploy.sh against fake sudo/systemctl/uv/curl: the sudo
-preflight fails early without touching `current`, and a refused restart or an
-unhealthy engine rolls back. Needs GNU coreutils (Linux, or `brew install
-coreutils` on macOS)."""
+"""deploy/remote_deploy.sh against fake sudo/uv/curl.
+
+The unit(s) to restart come from the server's own `sudo -n -l` output, so a
+deploy works with either bootstrap's rule without a root step. Needs GNU
+coreutils (Linux, or `brew install coreutils` on macOS)."""
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -13,20 +13,28 @@ import pytest
 SCRIPT = Path(__file__).parent.parent / "deploy" / "remote_deploy.sh"
 GNUBIN = Path("/opt/homebrew/opt/coreutils/libexec/gnubin")
 
+# Exactly what the production server printed on 2026-10-08.
+SERVER_RULES_TWO_INSTANCE = """Matching Defaults entries for sakhii on server1:
+    !visiblepw, always_set_home, env_reset, secure_path=/sbin\\:/bin\\:/usr/sbin\\:/usr/bin
+
+User sakhii may run the following commands on server1:
+    (root) NOPASSWD: /bin/systemctl restart sakhii-voice@8000, /bin/systemctl restart sakhii-voice@8001, /bin/systemctl start sakhii-voice@8000, /bin/systemctl start sakhii-voice@8001
+"""
+RULES_SINGLE = """User sakhii may run the following commands on server1:
+    (root) NOPASSWD: /usr/bin/systemctl restart sakhii-voice, /usr/bin/systemctl start sakhii-voice, /bin/systemctl restart sakhii-voice, /bin/systemctl start sakhii-voice
+"""
+
 FAKES = {
-    # sudo -n -l <cmd>  -> allowed?   sudo -n <cmd> -> run it (logged)
+    # `sudo -n -l` prints $FAKE_RULES; `sudo -n <cmd>` runs only commands the
+    # rules list, word for word (like sudo), and logs them.
     "sudo": """#!/usr/bin/env bash
 [ "$1" = -n ] && shift
 if [ "$1" = -l ]; then
-  [ "$FAKE_SUDO_ALLOWED" = 1 ] && exit 0
-  [ -z "$2" ] && { echo "User sakhii may run: (root) NOPASSWD: /bin/systemctl restart other"; exit 0; }
-  exit 1
+  [ -n "$FAKE_RULES" ] || { echo "sudo: a password is required" >&2; exit 1; }
+  printf '%s' "$FAKE_RULES"; exit 0
 fi
-[ "$FAKE_SUDO_ALLOWED" = 1 ] || { echo "sudo: a password is required" >&2; exit 1; }
-"$@"
-""",
-    "systemctl": """#!/usr/bin/env bash
-echo "systemctl $*" >> "$FAKE_LOG"
+case "$FAKE_RULES" in *"$*"*) ;; *) echo "sudo: a password is required" >&2; exit 1;; esac
+echo "$*" >> "$FAKE_LOG"
 [ "$FAKE_RESTART_OK" = 1 ]
 """,
     "uv": """#!/usr/bin/env bash
@@ -34,18 +42,17 @@ echo "systemctl $*" >> "$FAKE_LOG"
 exit 0
 """,
     "curl": """#!/usr/bin/env bash
-[ "$FAKE_HEALTHY" = 1 ]
+case " $FAKE_HEALTHY_PORTS " in *" ${@: -1} "*) exit 0;; esac
+for p in $FAKE_HEALTHY_PORTS; do case "${@: -1}" in *":$p/"*) exit 0;; esac; done
+exit 1
 """,
 }
 
 
 def _gnu_path() -> str | None:
-    probe = subprocess.run(["mv", "-T", "--help"], capture_output=True)
-    if probe.returncode == 0:
+    if subprocess.run(["mv", "-T", "--help"], capture_output=True).returncode == 0:
         return ""
-    if GNUBIN.is_dir():
-        return str(GNUBIN)
-    return None
+    return str(GNUBIN) if GNUBIN.is_dir() else None
 
 
 @pytest.fixture
@@ -68,17 +75,18 @@ def server(tmp_path):
         (rel / "pyproject.toml").write_text("")
     (root / "current").symlink_to(old)
 
-    def run(*, allowed=True, restart_ok=True, healthy=True):
+    def run(rules, *, restart_ok=True, healthy_ports="8000 8001"):
         env = {
             **os.environ,
             "PATH": os.pathsep.join(p for p in (str(bin_dir), gnu, os.environ["PATH"]) if p),
             "SAKHII_ROOT": str(root),
             "UV": str(bin_dir / "uv"),
             "HEALTH_TRIES": "2",
+            "REJOIN_SECS": "0",
             "FAKE_LOG": str(tmp_path / "calls.log"),
-            "FAKE_SUDO_ALLOWED": "1" if allowed else "0",
+            "FAKE_RULES": rules,
             "FAKE_RESTART_OK": "1" if restart_ok else "0",
-            "FAKE_HEALTHY": "1" if healthy else "0",
+            "FAKE_HEALTHY_PORTS": healthy_ports,
         }
         proc = subprocess.run(["bash", str(SCRIPT), str(new)], env=env, capture_output=True, text=True)
         log = tmp_path / "calls.log"
@@ -88,42 +96,49 @@ def server(tmp_path):
     return run, new
 
 
-def test_success_switches_current_and_restarts(server):
+def test_deploys_with_the_servers_current_two_instance_rule(server):
+    """The rule on the server today: /bin/systemctl, @8000 and @8001."""
     run, new = server
-    proc, current, calls = run()
+    proc, current, calls = run(SERVER_RULES_TWO_INSTANCE)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert current == new.name
-    assert calls == ["systemctl restart sakhii-voice"]
-    assert (new / ".venv").is_dir()
+    assert calls == [
+        "/bin/systemctl restart sakhii-voice@8000",
+        "/bin/systemctl restart sakhii-voice@8001",
+    ]
+    assert ">> will restart: sakhii-voice@8000 sakhii-voice@8001" in proc.stdout
 
 
-def test_preflight_fails_early_without_touching_current(server):
+def test_deploys_with_the_single_unit_rule(server):
     run, new = server
-    proc, current, calls = run(allowed=False)
+    proc, current, calls = run(RULES_SINGLE)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert current == new.name
+    assert calls == ["/bin/systemctl restart sakhii-voice"]
+
+
+def test_no_rule_fails_early_without_touching_current(server):
+    run, new = server
+    proc, current, calls = run("")
     assert proc.returncode == 1
     assert current == "20260101000000-old"
-    assert calls == []  # nothing restarted
-    assert not (new / ".venv").exists()  # nothing built
-    out = proc.stdout
-    assert f"sudo bash {new}/deploy/bootstrap.sh --no-webserver" in out
-    assert "20260101000000-old is still live" in out
-    # The server's actual rules are printed, so a failed deploy log shows them.
-    assert "sudo -n -l reports:" in out and "/bin/systemctl restart other" in out
+    assert calls == []
+    assert not (new / ".venv").exists()
+    assert f"sudo bash {new}/deploy/bootstrap.sh --no-webserver" in proc.stdout
+    assert "20260101000000-old is still live" in proc.stdout
 
 
 def test_refused_restart_rolls_back(server):
     run, _ = server
-    proc, current, calls = run(restart_ok=False)
+    proc, current, _ = run(SERVER_RULES_TWO_INSTANCE, restart_ok=False)
     assert proc.returncode == 1
     assert current == "20260101000000-old"
-    assert "could not restart sakhii-voice, rolling back to 20260101000000-old" in proc.stdout
+    assert "could not restart sakhii-voice@8000, rolling back to 20260101000000-old" in proc.stdout
 
 
-def test_unhealthy_engine_rolls_back(server):
+def test_unhealthy_instance_rolls_back(server):
     run, _ = server
-    proc, current, calls = run(healthy=False)
+    proc, current, calls = run(SERVER_RULES_TWO_INSTANCE, healthy_ports="8000")
     assert proc.returncode == 1
     assert current == "20260101000000-old"
-    assert "unhealthy on 127.0.0.1:8000, rolling back" in proc.stdout
-    assert calls == ["systemctl restart sakhii-voice", "systemctl restart sakhii-voice"]
-
+    assert "sakhii-voice@8001 unhealthy on 127.0.0.1:8001, rolling back" in proc.stdout
