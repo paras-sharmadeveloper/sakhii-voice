@@ -16,8 +16,12 @@ app-level change since, including the `ef33b49` token changes.
 - `deploy/remote_deploy.sh` restarts `sakhii-voice` and health-checks
   `127.0.0.1:8000/healthz`. It rolls back `current` if the restart or the health check
   fails. Before building or switching anything, it checks that
-  `sudo -n systemctl restart sakhii-voice` is allowed. If not, it fails early with the
-  exact `bootstrap.sh` command to run, and the live release is untouched.
+  `sudo -n systemctl restart sakhii-voice` is allowed. It uses `sudo -n -l`, falling
+  back to `sudo -n systemctl start sakhii-voice` (same sudoers rule, no-op on a running
+  service), because on this server `sudo -n -l` was refused while the same NOPASSWD
+  restart had worked hours earlier, most likely sudo's `listpw` default.
+  If neither is allowed, it fails early, prints the sudo rules and the exact
+  `bootstrap.sh` command to run, and leaves the live release untouched.
 - `deploy/bootstrap.sh`:
   - the sudo rule allows only `systemctl restart|start sakhii-voice`;
   - it stops, disables and removes `sakhii-voice@8000`/`@8001` if present, then
