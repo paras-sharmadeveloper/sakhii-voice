@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from app import live_settings, store
+from app import dashboard, live_settings, store
 
 INTERVAL_SECS = 30
 TTL_SECS = 90
@@ -80,6 +80,7 @@ def snapshot(active_calls: int) -> dict[str, Any]:
         "started_at": round(STARTED_AT, 3),
         "uptime_secs": round(now - STARTED_AT),
         "active_calls": active_calls,
+        "dashboard_sockets": dashboard.connected(),
         "settings_version": st.settings_version,
         "secrets_version": st.secrets_version,
         "last_reload": st.last_reload or None,

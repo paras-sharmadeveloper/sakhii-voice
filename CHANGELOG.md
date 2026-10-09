@@ -4,6 +4,29 @@ Any change that needs a step on the server goes here, under
 **Server action required**. Deploys are manual (`deploy/update.sh`), so a
 server step that isn't listed here won't happen.
 
+## 2026-10-09: dashboard notifications socket; recording upload fixes
+
+- New `wss://voice.sakhii.io/ws/dashboard` (README, "Dashboard notifications"): live
+  calls, new calls, summaries and recordings reach the dashboard in real time. Laravel
+  issues the tokens and publishes call notifications to Redis.
+- Recording uploads to non-AWS storage (R2, Spaces, MinIO) no longer send boto3's
+  default checksum headers, which some of these stores reject.
+- Upload failures show in `sakhii:voice:status` → `providers.recording.storage`, with
+  the S3 error code. Voice Engine Settings → Provider health shows them, and so does
+  `php artisan sakhii-voice:doctor`.
+
+### Server action required
+
+1. `sudo bash /opt/sakhii-voice/app/deploy/update.sh` (no new dependencies).
+2. Apache, for the dashboard socket: add the `/ws/dashboard` lines from
+   `deploy/apache-webuzo.conf` to
+   `/var/webuzo-data/apache2/custom/domains/voice.sakhii.io.conf`, above the `/health`
+   lines. Then run `/usr/local/apps/apache2/bin/httpd -t` and restart Apache from
+   Webuzo.
+3. Laravel: `git pull`, then `php artisan config:clear`. Then run
+   `php artisan sakhii-voice:doctor`, which checks every step recordings and summaries
+   depend on and says what to fix.
+
 ## 2026-10-09: status right after a reload; case-insensitive choices
 
 - After every settings reload (applied or rejected), the engine rewrites

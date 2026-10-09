@@ -537,6 +537,9 @@ every reload attempt, so the admin panel can show the result within a second. It
 - `last_reload.result` is `applied` or `rejected`, the latter with a `reason`.
 - `providers` counts calls since the engine started, per `<kind>.<provider>`. Only the
   error's type is recorded, never its message.
+- `recording.storage` is the recording uploads: `calls` counts the successful ones.
+  `last_error` is `NotConfigured` (no bucket, key or secret) or `ClientError.<S3 code>`,
+  for example `ClientError.AccessDenied` or `ClientError.NoSuchBucket`.
 
 Every setting (the table is generated from `app/settings.py` with
 `python scripts/settings_table.py`, and a test fails if it's out of date). "Where"
@@ -601,6 +604,33 @@ also stay in `.env` as a fallback.
 | `GOOGLE_CREDENTIALS_JSON` | secrets | yes | string | (empty) |  | Google service-account JSON (STT, TTS, Gemini on Vertex). |
 | `RECORDING_S3_KEY` | secrets | yes | string | (empty) |  | Recording storage access key. |
 | `RECORDING_S3_SECRET` | secrets | yes | string | (empty) |  | Recording storage secret key. |
+
+## Dashboard notifications (`/ws/dashboard`)
+
+The Sakhii dashboard's bell, dashboard page and Enquiries update in real time
+over `wss://voice.sakhii.io/ws/dashboard`:
+
+1. The browser gets `{url, token}` from Laravel (`GET /api/user/realtime`). The token
+   is valid for 10 minutes, for one account.
+2. It opens the socket and sends `{"type": "auth", "token": "…"}` as its first message,
+   within 5 s. The engine answers `{"type": "ready"}`, or closes with 1008 if the token
+   is bad.
+3. Notifications for that account follow as JSON messages.
+
+Notifications travel over Redis pub/sub, channel `sakhii:voice:notify:<client_id>`
+(with `REDIS_KEY_PREFIX`). Laravel publishes call logs as they're saved, and when a
+summary or recording arrives later. The engine publishes live calls itself:
+
+```json
+{"id": "live-CA0123", "type": "live_call", "title": "Live call in progress", "body": "Caller: 09876543210", "call_sid": "CA0123", "agent_id": "42", "time": "2026-10-09T10:30:00+00:00"}
+{"id": "live-CA0123", "type": "live_call_ended", "call_sid": "CA0123", "duration_secs": 84.2, "time": "2026-10-09T10:31:24+00:00"}
+```
+
+The token is `base64url(JSON {"c": client_id, "exp": unix}) + "." +
+base64url(HMAC-SHA256(k, first part))`, with `k = HMAC-SHA256(SAKHII_VOICE_CRED_KEY
+bytes, "sakhii:voice:dashboard")`. Each account can have at most 20 sockets open, and
+`dashboard_sockets` in `sakhii:voice:status` counts them. These sockets don't count as
+calls, so a restart doesn't wait for them.
 
 ## Test call before the Laravel integration
 

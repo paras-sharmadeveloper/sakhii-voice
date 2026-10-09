@@ -72,3 +72,14 @@ async def test_silent_call_uploads_nothing(s3):
     rec = recording.CallRecorder("CA79", RATE)
     assert await rec.finish() is None
     assert s3.list_objects_v2(Bucket="calls").get("KeyCount") == 0
+
+
+async def test_storage_errors_reach_the_status_with_the_s3_code(s3, monkeypatch):
+    from app import status
+
+    monkeypatch.setenv("RECORDING_S3_BUCKET", "no-such-bucket")
+    get_settings.cache_clear()
+    rec = recording.CallRecorder("CA80", RATE)
+    await rec.processor._event_handlers["on_audio_data"].handlers[0](rec.processor, _stereo(1), RATE, 2)
+    assert await rec.finish() is None
+    assert status._providers["recording.storage"]["last_error"] == "ClientError.NoSuchBucket"

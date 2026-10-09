@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from loguru import logger
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 
+from app import status
 from app.settings import Settings, get_settings
 
 CHANNELS = 2
@@ -80,9 +81,12 @@ class CallRecorder:
             key = f"{s.recording_s3_prefix}{time.strftime('%Y/%m/%d')}/{self.call_sid}.mp3"
             await asyncio.to_thread(upload, mp3_path, key, s)
             url = f"{s.recording_public_base_url.rstrip('/')}/{key}" if s.recording_public_base_url else None
+            status.record("recording", "storage")
             return Recording(key=key, url=url, duration_secs=duration)
         except Exception as e:
-            logger.error("Recording for {} failed: {}", self.call_sid, type(e).__name__)
+            reason = error_name(e)
+            status.record("recording", "storage", reason)
+            logger.error("Recording for {} failed: {}", self.call_sid, reason)
             return None
         finally:
             for path in (self.raw_path, mp3_path):
@@ -106,14 +110,33 @@ def encode_mp3(raw_path: str, mp3_path: str, sample_rate: int, kbps: int) -> Non
         dst.write(encoder.flush())
 
 
+def error_name(e: BaseException) -> str:
+    """Exception type, plus the S3 error code (AccessDenied, NoSuchBucket…) when there is one.
+    Never the message: it can carry request details."""
+    # upload_file wraps the S3 ClientError (S3UploadFailedError): use the cause's code.
+    seen, current = 0, e
+    while current is not None and seen < 5:
+        response = getattr(current, "response", None)
+        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        if code:
+            return f"ClientError.{code}"
+        current, seen = current.__cause__ or current.__context__, seen + 1
+    return type(e).__name__
+
+
 def upload(path: str, key: str, s: Settings) -> None:
     import boto3
+    from botocore.config import Config
 
+    # boto3 >= 1.36 sends CRC checksums by default, which some S3-compatible
+    # stores (R2, older MinIO, Spaces) reject. Only when the store requires them.
+    config = Config(request_checksum_calculation="when_required", response_checksum_validation="when_required")
     client = boto3.client(
         "s3",
         endpoint_url=s.recording_s3_endpoint or None,
         aws_access_key_id=s.recording_s3_key,
         aws_secret_access_key=s.recording_s3_secret,
         region_name=s.recording_s3_region or None,
+        config=config if s.recording_s3_endpoint else None,
     )
     client.upload_file(path, s.recording_s3_bucket, key, ExtraArgs={"ContentType": "audio/mpeg"})

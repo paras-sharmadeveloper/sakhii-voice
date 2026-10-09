@@ -16,6 +16,7 @@ Latency decisions, in one place:
 import asyncio
 import statistics
 import time
+from datetime import datetime, timezone
 
 from fastapi import WebSocket
 from loguru import logger
@@ -38,7 +39,7 @@ from pipecat.transports.websocket.fastapi import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
-from app import analysis, credentials, providers, status, store, turns
+from app import analysis, credentials, dashboard, providers, status, store, turns
 from app.exotel import ExotelSerializer, media_chunk_10ms_units
 from app.prompt import PronunciationFilter, call_variables, render, system_prompt
 from app.providers.base import CallContext
@@ -134,6 +135,7 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
         if storage_configured(s):
             recorder = CallRecorder(call_sid, s.exotel_sample_rate)
         else:
+            status.record("recording", "storage", "NotConfigured")
             log.warning("Agent {} has recording on but RECORDING_S3_* isn't configured", agent.agent_id)
 
     transport = FastAPIWebsocketTransport(
@@ -293,6 +295,12 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
             },
         )
     )
+    live_id = f"live-{call_sid}"
+    live_notice = asyncio.create_task(dashboard.notify(agent.tenant_id, {
+        "id": live_id, "type": "live_call", "title": "Live call in progress",
+        "body": f"Caller: {call.from_number or 'Unknown caller'}", "call_sid": call_sid,
+        "agent_id": agent.agent_id, "time": datetime.now(timezone.utc).isoformat(),
+    }))
     limiter = asyncio.create_task(_time_limit())
     try:
         runner = WorkerRunner(handle_sigint=False, handle_sigterm=False)
@@ -322,6 +330,11 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
             },
         )
         analysis.schedule(call_sid, agent, transcript, agent.languages.primary)
+        await live_notice
+        await dashboard.notify(agent.tenant_id, {
+            "id": live_id, "type": "live_call_ended", "call_sid": call_sid,
+            "duration_secs": round(time.time() - started_wall, 1), "time": datetime.now(timezone.utc).isoformat(),
+        })
         for kind in services.keys() - failed:
             status.record(kind, getattr(agent.models, kind).provider)
         log.info("call over: {} ({})", session.end_reason, _latency_summary(turn_latencies, first_speech))

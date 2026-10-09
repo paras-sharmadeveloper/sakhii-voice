@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 from pipecat.runner.utils import parse_telephony_websocket
 
-from app import live_settings, providers, status, store, tools
+from app import dashboard, live_settings, providers, status, store, tools
 from app.catalog import build_catalog
 from app.pipeline import run_call, warmup
 from app.redact import redact_uvicorn_logs
@@ -47,6 +47,7 @@ async def lifespan(_app: FastAPI):
     background = [
         asyncio.create_task(live_settings.watch()),
         asyncio.create_task(status.run(lambda: active_calls)),
+        asyncio.create_task(dashboard.relay()),
     ]
     logger.info("sakhii-voice {} ready", status.VERSION)
     yield
@@ -91,6 +92,12 @@ def _token_ok(given: str) -> bool:
     if not expected:
         return True
     return hmac.compare_digest(given.encode(), expected.encode())
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_socket(websocket: WebSocket):
+    """Sakhii dashboard notifications (app/dashboard.py). Auth is the first message."""
+    await dashboard.serve(websocket)
 
 
 @app.websocket("/ws/exotel")
