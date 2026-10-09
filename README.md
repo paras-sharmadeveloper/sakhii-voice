@@ -461,8 +461,8 @@ also stored as `analysis` on the call hash. Stream entry:
 
 ## Settings (admin panel)
 
-Everything except a few bootstrap values is set from Sakhii's admin panel through Redis,
-and takes effect without a restart. `/opt/sakhii-voice/shared/.env` only needs the
+Everything except a few bootstrap values is set from Sakhii's admin panel (Super Admin →
+Voice Engine Settings) through Redis, and takes effect without a restart. `/opt/sakhii-voice/shared/.env` only needs the
 bootstrap values.
 
 - **Bootstrap** (`.env` only; a change needs a restart): `REDIS_HOST`, `REDIS_PORT`,
@@ -512,8 +512,9 @@ status, and if it's left out, a hash of the content is used.
 {"type": "settings.rejected", "data": "{\"reason\": \"VAD_STOP_SECS: Input should be less than or equal to 2\", \"settings_version\": \"8\", \"at\": 1791537256.8, \"settings_version_in_use\": \"7\", \"secrets_version_in_use\": \"3\"}"}
 ```
 
-**`sakhii:voice:status`** (string, JSON, rewritten every 30 s with a 90 s TTL, so a
-missing key means the engine is down):
+**`sakhii:voice:status`** (string, JSON). It's rewritten every 30 s and also right after
+every reload attempt, so the admin panel can show the result within a second. It has a
+90 s TTL, so a missing key means the engine is down:
 
 ```json
 {

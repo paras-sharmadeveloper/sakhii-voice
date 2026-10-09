@@ -167,6 +167,12 @@ async def test_bad_json_is_rejected(r):
     assert live_settings.state.last_reload["reason"] == "settings: not valid JSON"
 
 
+def test_choices_are_case_insensitive(monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "debug")  # older .env files
+    assert Settings(turn_detection="Smart").log_level == "DEBUG"
+    assert Settings(turn_detection="Smart").turn_detection == "smart"
+
+
 async def test_secrets_never_show_in_repr():
     s = Settings(openai_api_key=SECRET, exotel_ws_token=SECRET, redis_password=SECRET)
     assert SECRET not in repr(s) and SECRET not in str(s)
@@ -249,6 +255,21 @@ async def test_a_pinned_call_keeps_its_snapshot_across_tasks_and_threads(r):
 
 
 # --- status ---------------------------------------------------------------------
+
+async def test_status_is_republished_right_after_a_reload(r):
+    """Laravel shows the reload result within seconds, not at the next 30 s tick."""
+    live_settings.after_reload(lambda: status.publish(active_calls=0))
+    try:
+        await put(r, {"VAD_STOP_SECS": 0.3}, version=11)
+        await live_settings.reload()
+        assert json.loads(await r.get(PREFIX + "sakhii:voice:status"))["settings_version"] == "11"
+        await put(r, {"VAD_STOP_SECS": 99}, version=12)
+        await live_settings.reload()
+        doc = json.loads(await r.get(PREFIX + "sakhii:voice:status"))
+    finally:
+        live_settings._after_reload.pop()
+    assert doc["settings_version"] == "11" and doc["last_reload"]["result"] == "rejected"
+
 
 async def test_status_is_published_without_secrets(r):
     await put(r, {"VAD_STOP_SECS": 0.3}, {"OPENAI_API_KEY": SECRET}, version=4, secrets_version=2)

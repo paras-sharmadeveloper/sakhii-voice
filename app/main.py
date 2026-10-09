@@ -34,6 +34,8 @@ def configure_logging(s: Settings) -> None:
 configure_logging(get_settings())
 redact_uvicorn_logs()
 live_settings.on_change(configure_logging)
+# The admin panel waits for the reload result; don't make it wait for the 30 s tick.
+live_settings.after_reload(lambda: status.publish(active_calls))
 
 
 @asynccontextmanager

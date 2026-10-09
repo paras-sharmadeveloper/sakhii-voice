@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,10 +44,24 @@ class State:
 
 state = State()
 _on_change: list[Callable[[Settings], None]] = []
+_after_reload: list[Callable[[], Awaitable[None]]] = []
 
 
 def on_change(fn: Callable[[Settings], None]) -> None:
     _on_change.append(fn)
+
+
+def after_reload(fn: Callable[[], Awaitable[None]]) -> None:
+    """Runs after every reload attempt, applied or rejected (the engine republishes its status)."""
+    _after_reload.append(fn)
+
+
+async def _run_after_reload() -> None:
+    for fn in _after_reload:
+        try:
+            await fn()
+        except Exception as e:
+            logger.warning("After-reload hook failed: {}", type(e).__name__)
 
 
 def _keys(values: Any, store_name: str) -> dict[str, Any]:
@@ -131,6 +145,7 @@ async def reload(*, force: bool = False) -> bool | None:
             "reason": reason, "settings_version": _version(raw_settings), "at": now,
             "settings_version_in_use": state.settings_version, "secrets_version_in_use": state.secrets_version,
         })
+        await _run_after_reload()
         return False
 
     old = get_settings()
@@ -148,6 +163,7 @@ async def reload(*, force: bool = False) -> bool | None:
             fn(new)
         except Exception as e:
             logger.warning("Settings hook failed: {}", type(e).__name__)
+    await _run_after_reload()
     return True
 
 

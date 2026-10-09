@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BOOTSTRAP = {"bootstrap": True}
@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(220, ge=32, le=2000, description="Cap on LLM reply length when the agent doesn't set one.")
     default_max_call_secs: int = Field(600, ge=30, le=7200, description="Call length limit when the agent doesn't set one.")
     drain_timeout_secs: int = Field(615, ge=0, le=7200, description="On restart, how long live calls may continue. Keep above the longest call.")
+
+    @field_validator("log_level", "turn_detection", mode="before")
+    @classmethod
+    def _case_insensitive(cls, v: Any, info) -> Any:
+        """Older .env files have LOG_LEVEL=info; Laravel may send "Smart"."""
+        if not isinstance(v, str):
+            return v
+        return v.strip().upper() if info.field_name == "log_level" else v.strip().lower()
 
     @classmethod
     def kind(cls, name: str) -> str:

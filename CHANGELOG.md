@@ -4,6 +4,28 @@ Any change that needs a step on the server goes here, under
 **Server action required**. Deploys are manual (`deploy/update.sh`), so a
 server step that isn't listed here won't happen.
 
+## 2026-10-09: status right after a reload; case-insensitive choices
+
+- After every settings reload (applied or rejected), the engine rewrites
+  `sakhii:voice:status` immediately instead of at the next 30 s tick. Laravel's Voice
+  Engine Settings page uses this to show the result within a second.
+- `LOG_LEVEL` and `TURN_DETECTION` accept any case (`info`, `Smart`). Before this, an
+  older `.env` with `LOG_LEVEL=info` would have stopped the engine from starting.
+
+### Server action required
+
+1. `sudo bash /opt/sakhii-voice/app/deploy/update.sh` (no new dependencies).
+2. Laravel: set `SAKHII_VOICE_CRED_KEY` in Laravel's `.env` to **the same value** as in
+   `/opt/sakhii-voice/shared/.env`, run `php artisan migrate` (new table
+   `voice_engine_settings_revisions`), then `php artisan config:clear`.
+3. Open Super Admin → Voice Engine Settings. Until the first save, the engine runs on
+   its `.env`. The first save (or "Send again") writes everything the panel knows:
+   - Panel Keys values, including Laravel's own `.env` keys for OpenAI, ElevenLabs and
+     Deepgram;
+   - the non-secret settings you've set.
+   Check that "Settings version in use" shows the new version before trimming the
+   engine's `.env`.
+
 ## 2026-10-09: settings from the admin panel (Redis, hot-reloaded)
 
 - Runtime settings come from `sakhii:voice:settings` (JSON) and `sakhii:voice:secrets`
