@@ -4,6 +4,86 @@ Any change that needs a step on the server goes here, under
 **Server action required**. Deploys are manual (`deploy/update.sh`), so a
 server step that isn't listed here won't happen.
 
+## 2026-10-09: settings from the admin panel (Redis, hot-reloaded)
+
+- Runtime settings come from `sakhii:voice:settings` (JSON) and `sakhii:voice:secrets`
+  (AES-256-GCM with `SAKHII_VOICE_CRED_KEY`). Precedence: Redis > `.env` > default.
+- The engine reloads on pub/sub `sakhii:voice:settings:changed` and every 60 s, with no
+  restart. Live calls keep the settings they started with. An invalid change is rejected
+  as a whole, and the reason is published as `settings.rejected`.
+- `sakhii:voice:status` is written every 30 s: git commit, uptime, active calls, settings
+  version, last reload and provider health.
+- New bootstrap variables `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`. The
+  existing `REDIS_URL` still works when `REDIS_HOST` is empty.
+- `LOG_LEVEL` now changes live. Tracebacks no longer print local variable values
+  (loguru `diagnose=False`), so a key held in a variable can't end up in the log.
+- New runtime setting `DEFAULT_MODELS`. Every setting is documented in the README table.
+
+### Server action required
+
+1. `sudo bash /opt/sakhii-voice/app/deploy/update.sh` (no new dependencies). The current
+   `.env` keeps working unchanged, because nothing is in Redis yet.
+2. After the deploy, check that `redis-cli -n <db> GET '<REDIS_KEY_PREFIX>sakhii:voice:status'`
+   shows the new commit as `version`.
+3. Once Laravel's settings page writes `sakhii:voice:settings`/`sakhii:voice:secrets` and the
+   status shows its `settings_version` (with `last_reload.result` = `applied`), you can
+   remove everything except the bootstrap lines from `/opt/sakhii-voice/shared/.env`:
+   `REDIS_*`, `REDIS_KEY_PREFIX`, `SAKHII_VOICE_CRED_KEY`, `HOST`, `PORT`. Do this one
+   last time, and only after the values are in Redis: a value that's in neither falls
+   back to its default (for example, an empty `EXOTEL_WS_TOKEN` turns the token check off).
+   Then restart once with `update.sh`, so the process no longer holds the removed values
+   from the environment.
+4. `SAKHII_VOICE_CRED_KEY` must be set (same value as in Laravel) before Laravel writes
+   `sakhii:voice:secrets`. Otherwise every change is rejected with "SAKHII_VOICE_CRED_KEY
+   must be base64 of 32 bytes", and the engine keeps running on `.env`.
+
+## 2026-10-09: provider registry, /catalog, encrypted credentials, call recording, after-call analysis
+
+- New providers. STT: Deepgram, Google, Azure, Gladia, AssemblyAI. LLM: Gemini on Vertex AI
+  (asia-south1, thinking off), Azure OpenAI, Groq, Anthropic. TTS: Azure, Google, Cartesia,
+  Deepgram Aura. Existing agents (Sarvam, ElevenLabs, OpenAI) behave as before.
+- `GET /catalog` (Bearer `ENGINE_ADMIN_TOKEN`) lists providers, models, live voices (cached
+  1 h), languages, tuning ranges and credential fields.
+- `models.*.credential_id` makes an agent use an encrypted `sakhii:voice:cred:<id>` instead
+  of the `.env` key.
+- `recording_enabled` per agent: stereo MP3 uploaded to S3-compatible storage after
+  hang-up. `call.ended` gains `recording_key`, `recording_url` and `recording_duration`.
+- After-call analysis: new `call.analyzed` event with summary, outcome, sentiment and fields.
+- Ravan: hosted-agent only (no streaming STT/LLM/TTS API), so there's no adapter. See the README.
+- New Python dependencies: Pipecat extras for the new providers, `cryptography`, `boto3` and
+  `lameenc`. `update.sh` installs them.
+
+### Server action required
+
+1. Add the new variables to `/opt/sakhii-voice/shared/.env` (see `.env.example`). Each one
+   is optional: if it's missing, that feature is off and calls work as before.
+   - `ENGINE_ADMIN_TOKEN`, to enable `/catalog` (`openssl rand -hex 24`).
+   - `SAKHII_VOICE_CRED_KEY` (`openssl rand -base64 32`), only when Laravel starts writing
+     credentials. Put **the same value** in Laravel's `.env`.
+   - Keys for any new provider you want to offer: `DEEPGRAM_API_KEY`, `AZURE_SPEECH_KEY`
+     + `AZURE_SPEECH_REGION`, `GOOGLE_CREDENTIALS_PATH` (service-account JSON readable by
+     the `sakhii-voice` user, for example `/opt/sakhii-voice/shared/google.json`, mode 600),
+     and so on.
+   - Recording: `RECORDING_S3_BUCKET`, `RECORDING_S3_KEY`, `RECORDING_S3_SECRET`, plus
+     `RECORDING_S3_ENDPOINT`/`RECORDING_S3_REGION` for non-AWS storage. Create the bucket
+     first, keep it private, and give the key write access to it only.
+2. `sudo bash /opt/sakhii-voice/app/deploy/update.sh`. It installs the new dependencies
+   (several minutes the first time; the Pipecat extras pull in the Google and Azure SDKs)
+   and restarts. Check that `/healthz` returns `{"ok": true}`.
+3. If `ENGINE_ADMIN_TOKEN` is set, check
+   `curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/catalog | head -c 300`.
+   If Laravel runs on the same server, it can call `http://127.0.0.1:8000/catalog` and
+   needs no Apache change. If it calls `https://voice.sakhii.io/catalog`, add the two new
+   `/catalog` lines from `deploy/apache-webuzo.conf` to
+   `/var/webuzo-data/apache2/custom/domains/voice.sakhii.io.conf`. Then run
+   `/usr/local/apps/apache2/bin/httpd -t` and restart Apache from Webuzo.
+4. Laravel follow-ups (not in this change):
+   - Read `/catalog` for the provider, model and voice pickers.
+   - Write `sakhii:voice:cred:<id>` in the format in the README.
+   - Publish `recording_enabled`, `analysis` and `credential_id` in the agent JSON.
+   - Have `sakhii-voice:sync-calls` handle `call.analyzed` (it currently acks and skips
+     it) and store `recording_key`/`recording_duration` on the call log.
+
 ## 2026-10-09: Laravel publishes agents to Redis and imports engine calls
 
 The Laravel backend writes `sakhii:voice:agent:{id}` and `sakhii:voice:number:{+91…}`

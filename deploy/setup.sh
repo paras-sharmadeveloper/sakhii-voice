@@ -34,8 +34,8 @@ install_deps
 
 if [ ! -f "$ENV_FILE" ]; then
   install -m 600 -o sakhii -g sakhii "$APP/.env.example" "$ENV_FILE"
-  echo "!! Created $ENV_FILE from .env.example. Fill in the API keys, REDIS_* and"
-  echo "!! EXOTEL_WS_TOKEN, then run this script again."
+  echo "!! Created $ENV_FILE from .env.example. Fill in REDIS_*, REDIS_KEY_PREFIX and"
+  echo "!! SAKHII_VOICE_CRED_KEY (the rest can come from the admin panel), then run this script again."
   exit 1
 fi
 

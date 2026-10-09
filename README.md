@@ -129,35 +129,194 @@ How we comply:
   above 100k.
 - The tests assert these rules on every media message.
 
-## Adding a provider
+## Providers
 
-Add one file and one registry line. For example, Deepgram STT:
+| Kind | Provider ids |
+|---|---|
+| STT | `sarvam`, `elevenlabs`, `deepgram`, `google`, `azure`, `gladia`, `assemblyai` |
+| LLM | `openai`, `sarvam`, `gemini` (Vertex AI), `azure_openai`, `groq`, `anthropic` |
+| TTS | `sarvam`, `elevenlabs`, `azure`, `google`, `cartesia`, `deepgram` (Aura, English only) |
+
+Each one is a Pipecat streaming service, built for 8 kHz. Every STT finalises on Pipecat's
+VAD, so turn detection is the same whichever STT you pick. Notes:
+
+- `gemini` runs on Vertex AI in `GOOGLE_LOCATION` (default `asia-south1`, Mumbai), with
+  thinking off by default (`thinking_budget=0` on 2.5 Flash, `minimal` on 3 Flash). To turn
+  it on, set `models.llm.options.thinking`.
+- `azure_openai`: `models.llm.model` (or the credential's `deployment`) is your Azure
+  **deployment name**. An endpoint ending in `/openai/v1` uses Azure's v1 API.
+- `languages` in `/catalog` come from each Pipecat service's own language map, not from
+  guesses. For example, Google STT has no Odia, AssemblyAI has hi/en/mr and Deepgram Aura
+  is English only.
+
+**Ravan isn't a provider here.** Its public API (Agni, `docs.ravan.ai/openapi.json`)
+covers agents, tools, RAG, calling and call sessions. It has no streaming STT, TTS or LLM
+endpoints that a pipeline could call. It's a hosted-agent platform like ElevenLabs
+Conversational AI, so any integration belongs in Laravel next to that one, not in this engine.
+
+### Adding a provider
+
+Add one file and one registry line. The file needs `build(choice, ctx)` and an `INFO`
+for `/catalog`. A TTS can also have `async voices(creds)`.
 
 ```python
-# app/providers/stt_deepgram.py
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from app.providers.base import CallContext, language_enum
+# app/providers/tts_example.py
+from pipecat.services.example.tts import ExampleTTSService
+from app.providers.base import CallContext, ProviderInfo, Tuning, model_list
 
 def build(choice, ctx: CallContext):
-    return DeepgramSTTService(
-        api_key=ctx.settings.deepgram_api_key,   # add the key to settings.py/.env
+    return ExampleTTSService(
+        api_key=ctx.secret("tts", "api_key", ctx.settings.example_api_key),  # credential, else .env
         sample_rate=ctx.sample_rate,
-        settings=DeepgramSTTService.Settings(model=choice.model or "nova-3",
-                                             language=language_enum(ctx.language)),
+        settings=ExampleTTSService.Settings(model=choice.model or "v1", voice=choice.voice),
     )
+
+INFO = ProviderInfo(name="Example", models=model_list(("v1", "Example v1")), languages=["en-IN"],
+                    credentials=["api_key"], tuning=[Tuning("speed", "Speed", 0.5, 2, 1, step=0.1)])
+
+async def voices(creds: dict[str, str]) -> list[dict]:   # creds["api_key"] from .env
+    ...  # return [{"id": ..., "name": ...}, ...]
 ```
 
 ```python
 # app/providers/__init__.py
-STT = {
+TTS = {
     ...
-    "deepgram": "app.providers.stt_deepgram",
+    "example": "app.providers.tts_example:build",
 }
 ```
 
-Also install the matching Pipecat extra, e.g. `pipecat-ai[deepgram]`. For STT, use the
-provider's streaming service and let it finalise on Pipecat VAD (manual commit), the way
-the existing STT providers do. Otherwise turn detection won't be the same across providers.
+Also add the Pipecat extra (for example `pipecat-ai[example]`) in `pyproject.toml`. For an
+STT, use the provider's streaming service and let it finalise on Pipecat's VAD (manual
+commit), like the existing ones do.
+
+## GET /catalog
+
+This endpoint is for Laravel's admin. It's off (404) unless `ENGINE_ADMIN_TOKEN` is set,
+and it needs `Authorization: Bearer <ENGINE_ADMIN_TOKEN>` (401 otherwise).
+
+```bash
+curl -H "Authorization: Bearer $ENGINE_ADMIN_TOKEN" https://voice.sakhii.io/catalog
+```
+
+```json
+{
+  "version": 1,
+  "generated_at": 1791527367,
+  "stt": [
+    {"id": "deepgram", "kind": "stt", "name": "Deepgram",
+     "models": [{"id": "nova-3-general", "name": "Nova-3"}, {"id": "nova-2-general", "name": "Nova-2"}],
+     "languages": ["hi-IN", "en-IN"], "credentials": ["api_key"], "streaming": true,
+     "tuning": [], "notes": "", "voices": null, "voices_error": null}
+  ],
+  "llm": [ ... ],
+  "tts": [
+    {"id": "sarvam", "kind": "tts", "name": "Sarvam AI",
+     "models": [{"id": "bulbul:v3", "name": "Bulbul v3"}],
+     "languages": ["hi-IN", "en-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "or-IN", "pa-IN", "ta-IN", "te-IN"],
+     "credentials": ["api_key"], "streaming": true,
+     "tuning": [{"key": "speed", "label": "Speaking speed", "min": 0.5, "max": 2.0, "default": 1.0, "unit": "x", "step": 0.05},
+                {"key": "temperature", "label": "Expressiveness", "min": 0.01, "max": 1.0, "default": 0.6, "unit": "", "step": 0.01}],
+     "notes": "", "voices": [{"id": "aditya", "name": "Aditya"}, {"id": "ritu", "name": "Ritu"}], "voices_error": null},
+    {"id": "cartesia", "...": "...", "voices": null, "voices_error": "no credentials configured on the engine"}
+  ]
+}
+```
+
+- `models[].id` goes into `models.<kind>.model`, `voices[].id` into `models.tts.voice`, and
+  `tuning[].key` into the matching agent field (`speed`, `temperature`) or into `options`.
+- `languages: ["*"]` means the model takes any language (LLMs).
+- `credentials` lists the fields a credential for this provider can hold (see below).
+- Voices are fetched live with the engine's `.env` keys and cached for 1 hour per
+  provider. If a provider has no key, or its API fails, it gets `voices: null` and a
+  `voices_error` (only the error type, never request details). The rest of the catalogue
+  still loads.
+
+## Provider credentials
+
+By default, every provider uses the engine's `.env` keys. To have an agent use its own
+account (a tenant's key, or a different Azure deployment), Laravel stores a credential and
+points the agent's model choice at it with `"credential_id": "<id>"`.
+
+**Key:** `sakhii:voice:cred:<id>`, with the same `REDIS_KEY_PREFIX` as other keys.
+
+**Value:** AES-256-GCM, encrypted with `SAKHII_VOICE_CRED_KEY`. This is base64 of 32 random
+bytes (`openssl rand -base64 32`), and must be identical in Laravel and the engine:
+
+```json
+{"v": 1, "iv": "<base64, 12 bytes>", "ct": "<base64 ciphertext>", "tag": "<base64, 16 bytes>"}
+```
+
+The additional authenticated data is the string `sakhii:voice:cred:<id>`, so a value copied
+to another id won't decrypt. The plaintext is
+`{"provider": "deepgram", "fields": {"api_key": "..."}}`, with the field names from the
+provider's `credentials` list in `/catalog`.
+
+```php
+$key   = base64_decode(config('services.sakhii_voice.cred_key'));
+$iv    = random_bytes(12);
+$plain = json_encode(['provider' => 'azure', 'fields' => ['api_key' => $apiKey, 'region' => 'centralindia']]);
+$ct    = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, "sakhii:voice:cred:{$id}", 16);
+Redis::set("sakhii:voice:cred:{$id}", json_encode([
+    'v' => 1, 'iv' => base64_encode($iv), 'ct' => base64_encode($ct), 'tag' => base64_encode($tag),
+]));
+```
+
+The engine decrypts in memory when a call starts, caches the result for 5 minutes and never
+logs the values. Errors name only the credential id. Any field a credential doesn't
+have falls back to `.env`. If the credential is missing or won't decrypt, the call is
+refused (stream closed with 1011) instead of silently using the platform's key.
+
+## Call recording
+
+**What Exotel offers:** the Voicebot applet has its own "record" checkbox, and the
+recording URL then comes back through Passthru and the Call Details API
+(`/v1/Accounts/<sid>/Calls/<CallSid>.json`, `RecordingUrl`). However, it's a beta feature,
+it's set per flow in the Exotel dashboard rather than per call, and since October 2024
+the URLs need your API credentials (or `PreSignedRecordingUrl`). So it can't follow a
+per-agent switch. If a whole number should always be recorded, that checkbox is a valid
+alternative and needs no engine setup.
+
+**What the engine does:** for agents with `"recording_enabled": true`, it records the
+call in stereo at 8 kHz, with the caller on the left channel and the agent on the right.
+Audio is appended to a temp file in 10-second chunks from a worker thread, so nothing on
+the audio path waits for disk. After hang-up, it's encoded to MP3 (`lameenc`, no ffmpeg,
+32 kbps by default, about 240 KB a minute) and uploaded to S3-compatible storage. Then
+the temp files are deleted. If the upload fails, the recording is lost but the
+call log isn't (`recording_*` fields are `null`).
+
+Setup (`.env`):
+
+```
+RECORDING_S3_BUCKET=sakhii-calls
+RECORDING_S3_KEY=...
+RECORDING_S3_SECRET=...
+RECORDING_S3_ENDPOINT=https://blr1.digitaloceanspaces.com   # empty for AWS S3; R2/MinIO/Spaces endpoint otherwise
+RECORDING_S3_REGION=ap-south-1                               # "auto" for R2
+RECORDING_S3_PREFIX=recordings/
+RECORDING_PUBLIC_BASE_URL=                                   # empty = private bucket
+```
+
+Objects are stored at `<prefix>YYYY/MM/DD/<CallSid>.mp3`. With a private bucket (the
+default and recommended), `call.ended` carries only `recording_key`, and Laravel signs a
+URL when someone plays it. With `RECORDING_PUBLIC_BASE_URL` set, `recording_url` is
+`<base>/<key>`. If an agent has recording on but storage isn't configured, the engine
+logs a warning and doesn't record.
+
+## After-call analysis
+
+After hang-up, one LLM request (`ANALYSIS_MODEL`, default `gpt-4o-mini`, JSON mode, 30 s
+timeout) reads the transcript and produces:
+
+- a 2–3 line summary in English, plus one in the call's language when it isn't English;
+- an outcome from the agent's `analysis.outcomes`;
+- the caller's sentiment;
+- the agent's `analysis.fields`.
+
+It runs as a background task after `call.ended` and has no effect on the call. Any failure
+is logged (as the error type only) and dropped. Calls where the caller never spoke are skipped.
+To turn it off for one agent, set `"analysis": {"enabled": false}`, or set
+`ANALYSIS_ENABLED=false` for the whole engine.
 
 ## Redis contract with Laravel
 
@@ -171,6 +330,7 @@ reads the same key.
 |---|---|---|
 | `sakhii:voice:agent:{agent_id}` | string (JSON below) | On agent save/deploy |
 | `sakhii:voice:number:{+91XXXXXXXXXX}` | string: agent_id | When an ExoPhone is assigned to a pipeline agent. E.164 format. |
+| `sakhii:voice:settings` / `sakhii:voice:secrets` | string | From the admin panel, then PUBLISH `sakhii:voice:settings:changed` (see "Settings") |
 | `sakhii:voice:call:{CallSid}:init` | string: `{"agent_id": "...", "variables": {"customer_name": "...", "amount_due": "...", "due_date": "...", "loan_id": "..."}}` | Before placing an outbound call. Use the Exotel CallSid from the Connect API response. Expire after ~1 h. |
 
 The agent is resolved in this order: `?agent_id=` on the Voicebot URL, then `agent_id` in
@@ -196,7 +356,13 @@ fields are ignored:
   "models": {
     "stt": {"provider": "sarvam", "model": "saaras:v3-realtime", "options": {}},
     "llm": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.35, "max_tokens": null, "options": {"service_tier": "priority"}},
-    "tts": {"provider": "sarvam", "model": "bulbul:v3", "voice": "priya", "speed": 1.0, "options": {}}
+    "tts": {"provider": "sarvam", "model": "bulbul:v3", "voice": "priya", "speed": 1.0, "options": {}, "credential_id": null}
+  },
+  "recording_enabled": false,
+  "analysis": {
+    "enabled": true,
+    "outcomes": ["resolved", "follow_up_needed", "transferred", "not_interested", "no_conversation"],
+    "fields": [{"key": "promised_date", "description": "Date the customer promised to pay"}]
   },
   "system_prompt": "You are {agent_name}... {amount_due} ... {due_date}",
   "persona": {"base_tone": "Professional and empathetic", "emotion_awareness": "Adaptive"},
@@ -216,6 +382,10 @@ Notes on fields:
   doesn't know are ignored. The ElevenLabs sliders accept 0–100 (`stability`,
   `similarity`, `style`).
 - For ElevenLabs, `tts.voice` must be the ElevenLabs **voice_id**, not a display name.
+- `models.*.credential_id` (optional) points to an encrypted `sakhii:voice:cred:<id>`
+  (see "Provider credentials"). If it's missing or null, the engine's `.env` keys are used.
+- `recording_enabled` (default `false`) and `analysis`: see "Call recording" and
+  "After-call analysis". `analysis.outcomes` defaults to the list shown above.
 - Languages can be codes (`hi-IN`) or builder names (`Hindi`).
 - `{placeholders}`: `agent_name`, `company` and `language` are built in. Everything else
   comes from `variables` and then from the per-call `:init` variables. Unknown
@@ -228,12 +398,208 @@ Notes on fields:
 
 | Key | Type | Content |
 |---|---|---|
-| `sakhii:voice:call:{CallSid}` | hash, 24 h TTL | `status` (`in_progress` / `completed`), `agent_id`, `tenant_id`, `from`, `to`, `started_at`, `ended_at`, `duration_secs`, `end_reason`, `next_action`, `transfer_to`, `latency_ms`, `tool_calls`, `transcript` |
+| `sakhii:voice:call:{CallSid}` | hash, 24 h TTL | `status` (`in_progress` / `completed`), `agent_id`, `tenant_id`, `from`, `to`, `started_at`, `ended_at`, `duration_secs`, `end_reason`, `next_action`, `transfer_to`, `latency_ms`, `tool_calls`, `transcript`, `recording_key`, `recording_url`, `recording_duration`, `analysis` (non-string values JSON-encoded; null fields left out) |
+| `sakhii:voice:status` | string, 90 s TTL | Engine status every 30 s (see "Settings") |
 | `sakhii:voice:active` | set | CallSids live right now (for a concurrency view or limit) |
-| `sakhii:voice:events` | stream | `call.started` and `call.ended` entries with `{type, call_sid, data}`. Laravel should consume them with a consumer group (`XREADGROUP`) for CallLogs, billing minutes, and the post-call webhook. |
+| `sakhii:voice:events` | stream | `call.started`, `call.ended`, `call.analyzed` and `settings.rejected` entries with fields `type`, `call_sid` and `data` (a JSON string). Laravel should consume them with a consumer group (`XREADGROUP`) for CallLogs, billing minutes, and the post-call webhook. |
 
 `end_reason` is one of `caller_hung_up`, `agent_ended`, `transferred`, `max_duration`,
 or `caller_silent`.
+
+**`call.ended`**: stream entry `{"type": "call.ended", "call_sid": "<CallSid>", "data": "<JSON>"}`,
+where `data` is:
+
+```json
+{
+  "agent_id": "42",
+  "tenant_id": "7",
+  "duration_secs": 84.4,
+  "end_reason": "caller_hung_up",
+  "transfer_to": null,
+  "latency_ms": {"turns": 6, "greeting": 410, "p50": 820, "p90": 1010, "max": 1180},
+  "turn_ends": {"smart_turn": 5, "smart_turn_silence_fallback": 1},
+  "tool_calls": [],
+  "transcript": [
+    {"role": "assistant", "text": "Namaste, main Sakhii bol rahi hoon Acme Finance se..."},
+    {"role": "user", "text": "Haan ji, boliye."}
+  ],
+  "recording_key": "recordings/2026/10/09/CA0123456789abcdef.mp3",
+  "recording_url": null,
+  "recording_duration": 84.2,
+  "status": "completed",
+  "ended_at": 1791527369.29
+}
+```
+
+The `recording_*` fields are `null` when the agent doesn't record or the upload failed.
+`recording_url` is set only with `RECORDING_PUBLIC_BASE_URL`. `recording_duration` is in
+seconds.
+
+**`call.analyzed`**: comes a few seconds after `call.ended`, for the same `call_sid`. It's
+also stored as `analysis` on the call hash. Stream entry:
+`{"type": "call.analyzed", "call_sid": "<CallSid>", "data": "<JSON>"}`, where `data` is:
+
+```json
+{
+  "agent_id": "42",
+  "summary": "Ramesh called about his overdue EMI of Rs 5,000.\nHe agreed to pay by the 15th via UPI; a payment link was sent.",
+  "summary_local": "Ramesh ji ne 5,000 rupaye ki EMI 15 tarikh tak UPI se bharne ka vaada kiya.",
+  "language": "hi-IN",
+  "outcome": "resolved",
+  "sentiment": "positive",
+  "fields": {"promised_date": "15th"}
+}
+```
+
+- `summary_local` is `null` for English calls.
+- `outcome` is one of the agent's `analysis.outcomes`, or `null` if the model answered
+  outside the list.
+- `sentiment` is `positive`, `neutral` or `negative` (or `null`).
+- `fields` has every configured key, with `null` for the ones that weren't mentioned.
+- No `call.analyzed` is sent when analysis is off, the caller never spoke, or the
+  request failed.
+
+## Settings (admin panel)
+
+Everything except a few bootstrap values is set from Sakhii's admin panel through Redis,
+and takes effect without a restart. `/opt/sakhii-voice/shared/.env` only needs the
+bootstrap values.
+
+- **Bootstrap** (`.env` only; a change needs a restart): `REDIS_HOST`, `REDIS_PORT`,
+  `REDIS_PASSWORD`, `REDIS_DB` (or the older `REDIS_URL`), `REDIS_KEY_PREFIX`,
+  `SAKHII_VOICE_CRED_KEY`, plus `HOST`/`PORT`, the address the engine listens on.
+- **Runtime**: `sakhii:voice:settings`, plain JSON, no secrets.
+- **Secret**: `sakhii:voice:secrets`, encrypted.
+
+**Precedence:** a Redis value beats the `.env` value, which beats the code default. A
+server with only a `.env` works exactly as before. `null` or `""` in Redis means "not set
+here", so a blank admin field falls back to `.env` and never wipes a key. To stop using a
+`.env` value, set a different value in Redis or delete the line from `.env`.
+
+**`sakhii:voice:settings`** (string, JSON):
+
+```json
+{"version": 7, "values": {"VAD_STOP_SECS": 0.25, "TURN_DETECTION": "smart", "LOG_LEVEL": "INFO",
+                          "DEFAULT_MODELS": {"stt.deepgram": "nova-3-general"}, "RECORDING_S3_BUCKET": "sakhii-calls"}}
+```
+
+**`sakhii:voice:secrets`** (string): the same envelope as provider credentials (see
+"Provider credentials"), with additional data `sakhii:voice:secrets` (no id) and plaintext
+`{"version": 3, "fields": {"OPENAI_API_KEY": "...", "EXOTEL_WS_TOKEN": "..."}}`.
+
+```php
+$plain = json_encode(['version' => $version, 'fields' => $secrets]);
+$ct = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, 'sakhii:voice:secrets', 16);
+Redis::set('sakhii:voice:secrets', json_encode(['v' => 1, 'iv' => base64_encode($iv), 'ct' => base64_encode($ct), 'tag' => base64_encode($tag)]));
+Redis::publish('sakhii:voice:settings:changed', (string) $version);
+```
+
+**Reload:** after writing, publish anything on `sakhii:voice:settings:changed`. The engine
+listens on both the prefixed and the unprefixed channel name, because Laravel's Redis
+clients differ on whether they prefix channels. It also checks every 60 s, so a missed
+message only delays a change. `version` is any string or number. It's echoed back in the
+status, and if it's left out, a hash of the content is used.
+
+- **New calls** use the new settings. **Calls already running keep the settings they
+  started with**, including their end-of-call recording upload and analysis.
+- **Validation:** names must be known and in the right store (a secret in `settings`, or a
+  bootstrap value in either, is rejected). Types and ranges are checked as in the table
+  below. If anything fails, the whole change is rejected: the engine keeps its current
+  settings and adds one `settings.rejected` entry to `sakhii:voice:events`. The reason
+  gives setting names and rules only, never values:
+
+```json
+{"type": "settings.rejected", "data": "{\"reason\": \"VAD_STOP_SECS: Input should be less than or equal to 2\", \"settings_version\": \"8\", \"at\": 1791537256.8, \"settings_version_in_use\": \"7\", \"secrets_version_in_use\": \"3\"}"}
+```
+
+**`sakhii:voice:status`** (string, JSON, rewritten every 30 s with a 90 s TTL, so a
+missing key means the engine is down):
+
+```json
+{
+  "version": "3f2a9c1d04b7",
+  "host": "voice-1", "pid": 4121,
+  "started_at": 1791520000.0, "uptime_secs": 17256,
+  "active_calls": 3,
+  "settings_version": "7", "secrets_version": "3",
+  "last_reload": {"at": 1791537000.1, "result": "applied", "reason": null},
+  "providers": {
+    "stt.sarvam": {"calls": 412, "errors": 0, "last_error": null, "last_error_at": null, "last_ok_at": 1791537250.2},
+    "tts.cartesia": {"calls": 18, "errors": 2, "last_error": "ConnectionClosedError", "last_error_at": 1791530011.0, "last_ok_at": 1791537101.9}
+  },
+  "updated_at": 1791537256.8
+}
+```
+
+- `version` is the deployed git commit.
+- `settings_version`/`secrets_version` are `null` while nothing is in Redis (`.env` only).
+- `last_reload.result` is `applied` or `rejected`, the latter with a `reason`.
+- `providers` counts calls since the engine started, per `<kind>.<provider>`. Only the
+  error's type is recorded, never its message.
+
+Every setting (the table is generated from `app/settings.py` with
+`python scripts/settings_table.py`, and a test fails if it's out of date). "Where"
+means `.env` only, `sakhii:voice:settings` or `sakhii:voice:secrets`. Any setting can
+also stay in `.env` as a fallback.
+
+| Name | Where | Secret | Type | Default | Range / values | Description |
+|---|---|---|---|---|---|---|
+| `HOST` | .env only | no | string | `127.0.0.1` |  | Listen address. |
+| `PORT` | .env only | no | int | `8000` | 1 – 65535 | Listen port. |
+| `REDIS_HOST` | .env only | no | string | (empty) |  | Redis host. Empty = use REDIS_URL. |
+| `REDIS_PORT` | .env only | no | int | `6379` | 1 – 65535 | Redis port. |
+| `REDIS_PASSWORD` | .env only | yes | string | (empty) |  | Redis password. |
+| `REDIS_DB` | .env only | no | int | `0` | 0 – 15 | Redis database number. |
+| `REDIS_URL` | .env only | yes | string | `redis://127.0.0.1:6379/0` |  | Used only when REDIS_HOST is empty (older .env files). |
+| `REDIS_KEY_PREFIX` | .env only | no | string | (empty) |  | Laravel's REDIS_PREFIX, so both sides use the same keys. |
+| `SAKHII_VOICE_CRED_KEY` | .env only | yes | string | (empty) |  | base64 of 32 bytes; decrypts sakhii:voice:secrets and sakhii:voice:cred:&lt;id&gt;. Same value as in Laravel. |
+| `LOG_LEVEL` | settings | no | string | `INFO` | `TRACE` / `DEBUG` / `INFO` / `SUCCESS` / `WARNING` / `ERROR` | Engine log level. |
+| `EXOTEL_ACCOUNT_SID` | settings | no | string | (empty) |  | If set, a stream's account_sid must match. |
+| `EXOTEL_SAMPLE_RATE` | settings | no | int | `8000` | `8000` / `16000` | Exotel stream sample rate (Hz). |
+| `CALL_STATE_TTL_SECS` | settings | no | int | `86400` | 3600 – 2592000 | TTL of sakhii:voice:call:&lt;CallSid&gt;. |
+| `EVENTS_STREAM_MAXLEN` | settings | no | int | `100000` | 1000 – 10000000 | Approximate cap on sakhii:voice:events. |
+| `AZURE_SPEECH_REGION` | settings | no | string | `centralindia` |  | Azure Speech region. |
+| `AZURE_OPENAI_ENDPOINT` | settings | no | string | (empty) |  | Azure OpenAI endpoint (…/openai/v1 for the v1 API). |
+| `AZURE_OPENAI_API_VERSION` | settings | no | string | `2024-10-21` |  | Azure OpenAI API version (non-v1 endpoints). |
+| `GOOGLE_CREDENTIALS_PATH` | settings | no | string | (empty) |  | Path to a service-account JSON on the server (instead of GOOGLE_CREDENTIALS_JSON). |
+| `GOOGLE_PROJECT_ID` | settings | no | string | (empty) |  | Vertex AI project. Empty = from the service-account JSON. |
+| `GOOGLE_LOCATION` | settings | no | string | `asia-south1` |  | Vertex AI region for Gemini. |
+| `DEFAULT_MODELS` | settings | no | object | (empty) |  | Model used when an agent leaves "model" empty, by "&lt;kind&gt;.&lt;provider&gt;", e.g. {"stt.deepgram": "nova-3-general"}. Otherwise each provider's built-in default. |
+| `RECORDING_S3_ENDPOINT` | settings | no | string | (empty) |  | S3-compatible endpoint. Empty = AWS S3. |
+| `RECORDING_S3_BUCKET` | settings | no | string | (empty) |  | Recording bucket. Empty = recording off. |
+| `RECORDING_S3_REGION` | settings | no | string | `auto` |  | Storage region ("auto" for R2). |
+| `RECORDING_S3_PREFIX` | settings | no | string | `recordings/` |  | Object key prefix. |
+| `RECORDING_PUBLIC_BASE_URL` | settings | no | string | (empty) |  | Public/CDN base for recording_url. Empty = private bucket, only recording_key is sent. |
+| `RECORDING_MP3_KBPS` | settings | no | int | `32` | 16 – 128 | Recording MP3 bitrate. |
+| `ANALYSIS_ENABLED` | settings | no | bool | `true` |  | After-call analysis (call.analyzed) on/off for every agent. |
+| `ANALYSIS_MODEL` | settings | no | string | `gpt-4o-mini` |  | OpenAI model for after-call analysis. |
+| `VAD_STOP_SECS` | settings | no | float | `0.2` | 0.1 – 2.0 | Silence after speech before the turn is evaluated. Each 0.1 s adds 0.1 s to every reply. |
+| `VAD_START_SECS` | settings | no | float | `0.2` | 0.05 – 1.0 | Speech needed before the caller counts as speaking. |
+| `VAD_CONFIDENCE` | settings | no | float | `0.7` | 0.3 – 0.95 | VAD speech confidence threshold. |
+| `TURN_DETECTION` | settings | no | string | `smart` | `smart` / `off` | smart = Smart Turn model judges each pause; off = fixed silence (USER_SPEECH_TIMEOUT). |
+| `SMART_TURN_STOP_SECS` | settings | no | float | `3.0` | 0.5 – 10.0 | Smart turn fallback: max silence when the model thinks the caller isn't finished. |
+| `USER_SPEECH_TIMEOUT` | settings | no | float | `0.6` | 0.2 – 3.0 | Turn detection off: silence that ends a turn. |
+| `INTERRUPT_MIN_SPEECH_SECS` | settings | no | float | `0.4` | 0.0 – 3.0 | Barge-in: continuous caller speech needed to stop the bot. |
+| `INTERRUPT_MIN_WORDS` | settings | no | int | `3` | 1 – 20 | Barge-in: or this many transcribed words. |
+| `LLM_MAX_TOKENS` | settings | no | int | `220` | 32 – 2000 | Cap on LLM reply length when the agent doesn't set one. |
+| `DEFAULT_MAX_CALL_SECS` | settings | no | int | `600` | 30 – 7200 | Call length limit when the agent doesn't set one. |
+| `DRAIN_TIMEOUT_SECS` | settings | no | int | `615` | 0 – 7200 | On restart, how long live calls may continue. Keep above the longest call. |
+| `EXOTEL_WS_TOKEN` | secrets | yes | string | (empty) |  | Token in the Voicebot URL (/ws/exotel/&lt;token&gt;). Empty = no check (local testing only). |
+| `ENGINE_ADMIN_TOKEN` | secrets | yes | string | (empty) |  | Bearer token for GET /catalog. Empty = /catalog is off. |
+| `SARVAM_API_KEY` | secrets | yes | string | (empty) |  | Platform Sarvam key (used when an agent has no credential_id). |
+| `ELEVENLABS_API_KEY` | secrets | yes | string | (empty) |  | Platform ElevenLabs key. |
+| `OPENAI_API_KEY` | secrets | yes | string | (empty) |  | Platform OpenAI key (also used by after-call analysis). |
+| `DEEPGRAM_API_KEY` | secrets | yes | string | (empty) |  | Platform Deepgram key. |
+| `GLADIA_API_KEY` | secrets | yes | string | (empty) |  | Platform Gladia key. |
+| `ASSEMBLYAI_API_KEY` | secrets | yes | string | (empty) |  | Platform AssemblyAI key. |
+| `GROQ_API_KEY` | secrets | yes | string | (empty) |  | Platform Groq key. |
+| `ANTHROPIC_API_KEY` | secrets | yes | string | (empty) |  | Platform Anthropic key. |
+| `CARTESIA_API_KEY` | secrets | yes | string | (empty) |  | Platform Cartesia key. |
+| `AZURE_SPEECH_KEY` | secrets | yes | string | (empty) |  | Platform Azure Speech key. |
+| `AZURE_OPENAI_API_KEY` | secrets | yes | string | (empty) |  | Platform Azure OpenAI key. |
+| `GOOGLE_CREDENTIALS_JSON` | secrets | yes | string | (empty) |  | Google service-account JSON (STT, TTS, Gemini on Vertex). |
+| `RECORDING_S3_KEY` | secrets | yes | string | (empty) |  | Recording storage access key. |
+| `RECORDING_S3_SECRET` | secrets | yes | string | (empty) |  | Recording storage secret key. |
 
 ## Test call before the Laravel integration
 

@@ -59,7 +59,7 @@ def test_builds_elevenlabs_and_llms(agent_dict):
 
 
 def test_unknown_provider(agent_dict):
-    agent_dict["models"]["llm"]["provider"] = "groq"
+    agent_dict["models"]["llm"]["provider"] = "no-such-llm"
     c = ctx(agent_dict)
     try:
         providers.build("llm", c.agent.models.llm, c)

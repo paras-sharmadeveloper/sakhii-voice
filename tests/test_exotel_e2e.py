@@ -267,3 +267,127 @@ async def test_token_never_reaches_the_logs(server):
         assert not [line for line in lines if secret in line], f"{secret!r} leaked"
     assert any("/ws/exotel/***" in line for line in handshakes)
     assert any("token=***&agent_id=42" in line for line in handshakes)
+
+
+async def _call_and_wait(port, r, seconds=1.2):
+    silence = base64.b64encode(b"\x00\x00" * 160).decode()
+    async with websockets.connect(f"ws://127.0.0.1:{port}/ws/exotel?token=secret") as ws:
+        await ws.send(json.dumps({"event": "connected"}))
+        await ws.send(_start())
+        for i in range(int(seconds / 0.02)):
+            await ws.send(json.dumps({"event": "media", "stream_sid": "ST1", "media": {"chunk": i, "payload": silence}}))
+            await asyncio.sleep(0.02)
+        await ws.send(json.dumps({"event": "stop", "stream_sid": "ST1", "stop": {"call_sid": "CA123"}}))
+    for _ in range(100):
+        state = await r.hgetall(PREFIX + "sakhii:voice:call:CA123")
+        if state.get("status") == "completed":
+            return state
+        await asyncio.sleep(0.1)
+    raise AssertionError("call never completed")
+
+
+async def test_recording_lands_in_call_ended(server, monkeypatch):
+    from app import recording
+
+    port, r = server
+    for k, v in {"RECORDING_S3_BUCKET": "calls", "RECORDING_S3_KEY": "k", "RECORDING_S3_SECRET": "s",
+                 "RECORDING_PUBLIC_BASE_URL": "https://rec.example.com"}.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    uploaded = []
+
+    def fake_upload(path, key, _s):
+        with open(path, "rb") as f:
+            uploaded.append((key, f.read()))
+
+    monkeypatch.setattr(recording, "upload", fake_upload)
+    raw = json.loads(await r.get(PREFIX + "sakhii:voice:agent:42"))
+    raw["recording_enabled"] = True
+    await r.set(PREFIX + "sakhii:voice:agent:42", json.dumps(raw))
+
+    state = await _call_and_wait(port, r)
+
+    assert len(uploaded) == 1
+    key, mp3 = uploaded[0]
+    assert key.endswith("/CA123.mp3") and len(mp3) > 0
+    assert state["recording_key"] == key
+    assert state["recording_url"] == f"https://rec.example.com/{key}"
+    assert float(state["recording_duration"]) > 0.5
+    ended = [json.loads(e[1]["data"]) for e in await r.xrange(PREFIX + "sakhii:voice:events") if e[1]["type"] == "call.ended"]
+    assert ended[0]["recording_key"] == key and ended[0]["recording_duration"] > 0.5
+
+
+async def test_no_recording_fields_when_off(server):
+    port, r = server
+    state = await _call_and_wait(port, r, seconds=0.4)
+    assert "recording_key" not in state
+    ended = [json.loads(e[1]["data"]) for e in await r.xrange(PREFIX + "sakhii:voice:events") if e[1]["type"] == "call.ended"]
+    assert ended[0]["recording_key"] is None and ended[0]["recording_url"] is None
+
+
+async def test_missing_credential_closes_the_call(server):
+    port, r = server
+    raw = json.loads(await r.get(PREFIX + "sakhii:voice:agent:42"))
+    raw["models"]["tts"]["credential_id"] = "999"
+    await r.set(PREFIX + "sakhii:voice:agent:42", json.dumps(raw))
+    async with websockets.connect(f"ws://127.0.0.1:{port}/ws/exotel?token=secret") as ws:
+        await ws.send(json.dumps({"event": "connected"}))
+        await ws.send(_start())
+        with pytest.raises(websockets.exceptions.ConnectionClosed) as exc:
+            await asyncio.wait_for(ws.recv(), 5)
+    assert exc.value.rcvd.code == 1011
+
+
+async def test_live_call_keeps_its_settings_through_a_hot_reload(server, monkeypatch):
+    """Settings change mid-call (pub/sub, picked up by the running engine): the
+    live call finishes on the old ones, the next call uses the new ones."""
+    from app import live_settings, recording
+    from tests.test_live_settings import KEY, seal
+
+    port, r = server
+    monkeypatch.setenv("SAKHII_VOICE_CRED_KEY", KEY)
+    get_settings.cache_clear()  # bootstrap value: as if the engine had started with it
+    uploaded = []
+    monkeypatch.setattr(recording, "upload", lambda path, key, s: uploaded.append(key))
+    raw = json.loads(await r.get(PREFIX + "sakhii:voice:agent:42"))
+    raw["recording_enabled"] = True
+    await r.set(PREFIX + "sakhii:voice:agent:42", json.dumps(raw))
+
+    async def publish(version, base):
+        await r.set(PREFIX + "sakhii:voice:settings", json.dumps({"version": version, "values": {
+            "RECORDING_S3_BUCKET": "calls", "RECORDING_PUBLIC_BASE_URL": base}}))
+        await r.set(PREFIX + "sakhii:voice:secrets", seal({"version": 1, "fields": {
+            "RECORDING_S3_KEY": "AKIA", "RECORDING_S3_SECRET": "s3-secret"}}))
+        await r.publish(PREFIX + "sakhii:voice:settings:changed", str(version))
+        for _ in range(100):
+            if live_settings.state.settings_version == str(version):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"engine never applied settings v{version}: {live_settings.state}")
+
+    await publish(1, "https://old.example.com")
+    silence = base64.b64encode(b"\x00\x00" * 160).decode()
+    async with websockets.connect(f"ws://127.0.0.1:{port}/ws/exotel/secret") as ws:
+        await ws.send(json.dumps({"event": "connected"}))
+        await ws.send(_start())
+        for i in range(25):
+            await ws.send(json.dumps({"event": "media", "stream_sid": "ST1", "media": {"chunk": i, "payload": silence}}))
+            await asyncio.sleep(0.02)
+        await publish(2, "https://new.example.com")  # mid-call
+        for i in range(25, 50):
+            await ws.send(json.dumps({"event": "media", "stream_sid": "ST1", "media": {"chunk": i, "payload": silence}}))
+            await asyncio.sleep(0.02)
+        await ws.send(json.dumps({"event": "stop", "stream_sid": "ST1", "stop": {"call_sid": "CA123"}}))
+    for _ in range(100):
+        state = await r.hgetall(PREFIX + "sakhii:voice:call:CA123")
+        if state.get("status") == "completed":
+            break
+        await asyncio.sleep(0.1)
+    assert state["recording_url"].startswith("https://old.example.com/")
+
+    await r.delete(PREFIX + "sakhii:voice:call:CA123")
+    state = await _call_and_wait(port, r, seconds=0.4)
+    assert state["recording_url"].startswith("https://new.example.com/")
+
+    status = json.loads(await r.get(PREFIX + "sakhii:voice:status"))  # published at startup
+    assert status["version"] and "active_calls" in status

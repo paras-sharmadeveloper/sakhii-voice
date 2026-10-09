@@ -15,16 +15,29 @@ from app.providers.base import CallContext
 STT: dict[str, str] = {
     "sarvam": "app.providers.stt_sarvam",
     "elevenlabs": "app.providers.stt_elevenlabs",
+    "deepgram": "app.providers.stt_deepgram",
+    "google": "app.providers.stt_google",
+    "azure": "app.providers.stt_azure",
+    "gladia": "app.providers.stt_gladia",
+    "assemblyai": "app.providers.stt_assemblyai",
 }
 
 LLM: dict[str, str] = {
     "openai": "app.providers.llm_openai",
     "sarvam": "app.providers.llm_sarvam",
+    "gemini": "app.providers.llm_gemini",
+    "azure_openai": "app.providers.llm_azure_openai",
+    "groq": "app.providers.llm_groq",
+    "anthropic": "app.providers.llm_anthropic",
 }
 
 TTS: dict[str, str] = {
     "sarvam": "app.providers.tts_sarvam",
     "elevenlabs": "app.providers.tts_elevenlabs",
+    "azure": "app.providers.tts_azure",
+    "google": "app.providers.tts_google",
+    "cartesia": "app.providers.tts_cartesia",
+    "deepgram": "app.providers.tts_deepgram",
 }
 
 REGISTRY = {"stt": STT, "llm": LLM, "tts": TTS}
@@ -44,6 +57,10 @@ def _builder(kind: str, provider: str) -> Callable[[Any, CallContext], Any]:
 
 
 def build(kind: str, choice: Any, ctx: CallContext) -> Any:
+    if not choice.model:
+        default = ctx.settings.default_models.get(f"{kind}.{choice.provider}")
+        if default:
+            choice = choice.model_copy(update={"model": default})
     return _builder(kind, choice.provider)(choice, ctx)
 
 

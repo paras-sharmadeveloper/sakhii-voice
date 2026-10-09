@@ -38,10 +38,11 @@ from pipecat.transports.websocket.fastapi import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
-from app import providers, store, turns
+from app import analysis, credentials, providers, status, store, turns
 from app.exotel import ExotelSerializer, media_chunk_10ms_units
 from app.prompt import PronunciationFilter, call_variables, render, system_prompt
 from app.providers.base import CallContext
+from app.recording import CallRecorder, storage_configured
 from app.settings import Settings, get_settings
 from app.tools import CallSession, register
 
@@ -93,22 +94,47 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
         from_number=call.from_number,
         to_number=call.to_number,
     )
+    try:
+        creds = await credentials.for_agent(agent)
+    except credentials.CredentialError as e:
+        log.error("Agent {}: {}", agent.agent_id, e)  # carries the credential id only
+        await websocket.close(code=1011)
+        return
     pronunciation = PronunciationFilter(agent)
     ctx = CallContext(
         agent=agent,
         settings=s,
         sample_rate=s.exotel_sample_rate,
         text_filters=[pronunciation] if pronunciation.active else [],
+        credentials=creds,
     )
 
-    try:
-        stt = providers.build("stt", agent.models.stt, ctx)
-        llm = providers.build("llm", agent.models.llm, ctx)
-        tts = providers.build("tts", agent.models.tts, ctx)
-    except Exception as e:
-        log.exception("Agent {} has an unusable model config: {}", agent.agent_id, e)
-        await websocket.close(code=1011)
-        return
+    services = {}
+    for kind in ("stt", "llm", "tts"):
+        choice = getattr(agent.models, kind)
+        try:
+            services[kind] = providers.build(kind, choice, ctx)
+        except Exception as e:
+            status.record(kind, choice.provider, e)
+            log.error("Agent {} has an unusable {} config: {}", agent.agent_id, kind, type(e).__name__)
+            await websocket.close(code=1011)
+            return
+    stt, llm, tts = services["stt"], services["llm"], services["tts"]
+    failed: set[str] = set()
+    for kind, service in services.items():
+        provider = getattr(agent.models, kind).provider
+
+        @service.event_handler("on_error")
+        async def _on_service_error(_service, error, kind=kind, provider=provider):
+            failed.add(kind)
+            status.record(kind, provider, status.error_type(error))
+
+    recorder = None
+    if agent.recording_enabled:
+        if storage_configured(s):
+            recorder = CallRecorder(call_sid, s.exotel_sample_rate)
+        else:
+            log.warning("Agent {} has recording on but RECORDING_S3_* isn't configured", agent.agent_id)
 
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -150,6 +176,7 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
             llm,
             tts,
             transport.output(),
+            *([recorder.processor] if recorder else []),
             aggregators.assistant(),
         ]
     )
@@ -274,6 +301,9 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
     finally:
         limiter.cancel()
         await started_write
+        # After hang-up: the caller has gone, nothing here delays the call.
+        recording = await recorder.finish() if recorder else None
+        transcript = _transcript(context)
         await store.call_ended(
             call_sid,
             {
@@ -285,9 +315,15 @@ async def run_call(websocket: WebSocket, call: ExotelCallData, agent_id: str | N
                 "latency_ms": _latency_summary(turn_latencies, first_speech),
                 "turn_ends": turn_ends,
                 "tool_calls": session.tool_calls,
-                "transcript": _transcript(context),
+                "transcript": transcript,
+                "recording_key": recording.key if recording else None,
+                "recording_url": recording.url if recording else None,
+                "recording_duration": recording.duration_secs if recording else None,
             },
         )
+        analysis.schedule(call_sid, agent, transcript, agent.languages.primary)
+        for kind in services.keys() - failed:
+            status.record(kind, getattr(agent.models, kind).provider)
         log.info("call over: {} ({})", session.end_reason, _latency_summary(turn_latencies, first_speech))
 
 

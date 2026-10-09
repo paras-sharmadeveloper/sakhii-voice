@@ -28,6 +28,12 @@ class CallContext:
     sample_rate: int
     # Applied by TTS services just before synthesis (pronunciation rules).
     text_filters: list[BaseTextFilter] = field(default_factory=list)
+    # Decrypted credential fields per kind ("stt"/"llm"/"tts"), see app/credentials.py.
+    credentials: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def secret(self, kind: str, name: str, fallback: str = "") -> str:
+        """A credential field for this call, or the .env fallback."""
+        return self.credentials.get(kind, {}).get(name) or fallback
 
     @property
     def language(self) -> str:
@@ -69,3 +75,80 @@ def unit_interval(value: Any) -> float:
     """Builder sliders send 0-100; providers want 0-1."""
     v = float(value)
     return v / 100.0 if v > 1.0 else v
+
+
+# ── Catalogue metadata (GET /catalog) ─────────────────────────────────────────
+#
+# Each provider module declares INFO; modules with a voices API also define
+#     async def voices(creds: dict[str, str]) -> list[dict]
+# (creds = credential fields, falling back to the engine's .env keys).
+
+INDIAN_LANGUAGES = ["hi-IN", "en-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "or-IN", "pa-IN", "ta-IN", "te-IN"]
+
+
+@dataclass
+class Tuning:
+    key: str
+    label: str
+    min: float
+    max: float
+    default: float
+    unit: str = ""
+    step: float = 1
+
+
+@dataclass
+class ProviderInfo:
+    name: str
+    models: list[dict[str, str]]
+    languages: list[str]
+    credentials: list[str]
+    streaming: bool = True
+    tuning: list[Tuning] = field(default_factory=list)
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        return asdict(self)
+
+
+def supported_languages(convert, candidates: list[str] = INDIAN_LANGUAGES) -> list[str]:
+    """Codes from `candidates` that a service's Pipecat language map really has.
+
+    Pipecat's resolve_language falls back to a guessed code for anything it
+    doesn't know, so calling the converter can't tell "supported" from
+    "guessed". Instead, look at the map the converter passes it: a language
+    counts if the map has it, or its base language (hi-IN → hi).
+    """
+    namespace = convert.__globals__
+    original = namespace.get("resolve_language")
+    if original is None:
+        return []
+    found: list[str] = []
+
+    def spy(language, language_map, use_base_code=True):
+        base = str(language.value).split("-")[0]
+        try:
+            base_language = Language(base)
+        except ValueError:
+            base_language = None
+        hit = language_map.get(language) or (language_map.get(base_language) if base_language else None)
+        if hit:
+            found.append(str(language.value))
+        return hit or ""
+
+    namespace["resolve_language"] = spy
+    try:
+        for code in candidates:
+            try:
+                convert(Language(code))
+            except Exception:
+                continue
+    finally:
+        namespace["resolve_language"] = original
+    return [c for c in candidates if c in found]
+
+
+def model_list(*pairs: tuple[str, str]) -> list[dict[str, str]]:
+    return [{"id": i, "name": n} for i, n in pairs]

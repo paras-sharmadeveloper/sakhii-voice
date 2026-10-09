@@ -134,7 +134,7 @@ def test_setup_without_env_file_stops_before_touching_services(box):
     assert proc.returncode == 1
     assert (root / "shared" / ".env").read_text() == (REPO / ".env.example").read_text()
     assert not [c for c in calls if c.startswith("systemctl")]
-    assert "Fill in the API keys" in proc.stdout
+    assert "Fill in REDIS_" in proc.stdout
 
 
 def test_setup_rerun_pulls_instead_of_cloning(box):

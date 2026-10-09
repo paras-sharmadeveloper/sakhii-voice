@@ -40,6 +40,8 @@ class ModelChoice(_Model):
     model: str | None = None
     # Provider-specific knobs (voice tuning sliders, reasoning effort, ...).
     options: dict[str, Any] = Field(default_factory=dict)
+    # sakhii:voice:cred:<id> (app/credentials.py); None = the engine's .env keys.
+    credential_id: str | None = None
 
 
 class LLMChoice(ModelChoice):
@@ -144,6 +146,23 @@ class HttpTool(_Model):
     wait_message: str | None = None
 
 
+class AnalysisField(_Model):
+    key: str
+    description: str = ""
+
+
+DEFAULT_OUTCOMES = ["resolved", "follow_up_needed", "transferred", "not_interested", "no_conversation"]
+
+
+class Analysis(_Model):
+    """After-call summary (call_analyzed event)."""
+
+    enabled: bool = True
+    outcomes: list[str] = Field(default_factory=lambda: list(DEFAULT_OUTCOMES))
+    # Values to pull out of the conversation, e.g. {"key": "promised_payment_date"}.
+    fields: list[AnalysisField] = Field(default_factory=list)
+
+
 class AgentConfig(_Model):
     schema_version: int = 1
     agent_id: str
@@ -171,6 +190,10 @@ class AgentConfig(_Model):
 
     # Default values for {placeholders}; per-call values override these.
     variables: dict[str, str] = Field(default_factory=dict)
+
+    # Record calls (stereo: caller left, agent right) to S3-compatible storage.
+    recording_enabled: bool = False
+    analysis: Analysis = Field(default_factory=Analysis)
 
     @field_validator("agent_id", "tenant_id", mode="before")
     @classmethod

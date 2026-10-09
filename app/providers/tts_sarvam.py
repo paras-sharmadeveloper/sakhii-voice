@@ -1,9 +1,18 @@
 """Sarvam Bulbul streaming TTS (websocket)."""
 
 from loguru import logger
-from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS, SarvamTTSService
+from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS, SarvamTTSService, language_to_sarvam_language
 
-from app.providers.base import CallContext, language_enum, resolve_model, settings_overrides
+from app.providers.base import (
+    CallContext,
+    ProviderInfo,
+    Tuning,
+    language_enum,
+    model_list,
+    resolve_model,
+    settings_overrides,
+    supported_languages,
+)
 
 DEFAULT_MODEL = "bulbul:v3"
 # bulbul:v2 is retired upstream (requests fail).
@@ -40,8 +49,24 @@ def build(choice, ctx: CallContext) -> SarvamTTSService:
     }
     settings.update(settings_overrides(SarvamTTSService.Settings, choice.options))
     return SarvamTTSService(
-        api_key=ctx.settings.sarvam_api_key,
+        api_key=ctx.secret("tts", "api_key", ctx.settings.sarvam_api_key),
         sample_rate=ctx.sample_rate,
         settings=SarvamTTSService.Settings(**settings),
         text_filters=ctx.text_filters,
     )
+
+INFO = ProviderInfo(
+    name="Sarvam AI",
+    models=model_list((DEFAULT_MODEL, "Bulbul v3")),
+    languages=supported_languages(language_to_sarvam_language),
+    credentials=["api_key"],
+    tuning=[
+        Tuning("speed", "Speaking speed", 0.5, 2.0, 1.0, "x", 0.05),
+        Tuning("temperature", "Expressiveness", 0.01, 1.0, 0.6, step=0.01),
+    ],
+)
+
+
+async def voices(creds: dict[str, str]) -> list[dict]:
+    """Bulbul v3 speakers (Sarvam has no voices endpoint; the list is fixed per model)."""
+    return [{"id": s, "name": s.title()} for s in TTS_MODEL_CONFIGS[DEFAULT_MODEL].speakers]

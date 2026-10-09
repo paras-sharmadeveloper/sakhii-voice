@@ -5,11 +5,17 @@ Laravel (control plane) writes:
     sakhii:voice:number:{e164}          STRING  agent_id answering that ExoPhone
     sakhii:voice:call:{call_sid}:init   STRING  optional, for outbound calls:
                                                 {"agent_id": "...", "variables": {...}}
+    sakhii:voice:cred:{id}              STRING  encrypted provider credential (app/credentials.py)
+    sakhii:voice:settings               STRING  runtime settings JSON (app/live_settings.py)
+    sakhii:voice:secrets                STRING  encrypted secret settings
+    sakhii:voice:settings:changed       PUBSUB  "reload now"
 
 This engine writes:
     sakhii:voice:call:{call_sid}        HASH    live call state (TTL'd)
     sakhii:voice:active                 SET     call_sids currently on the engine
-    sakhii:voice:events                 STREAM  call.started / call.ended events
+    sakhii:voice:events                 STREAM  call.started / call.ended / call.analyzed /
+                                                settings.rejected events
+    sakhii:voice:status                 STRING  engine status, every 30 s (app/status.py)
 
 All keys get REDIS_KEY_PREFIX in front so they line up with Laravel's prefix.
 """
@@ -32,7 +38,14 @@ _client: redis.Redis | None = None
 def client() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.from_url(get_settings().redis_url, decode_responses=True)
+        s = get_settings()
+        if s.redis_host:
+            _client = redis.Redis(
+                host=s.redis_host, port=s.redis_port, db=s.redis_db,
+                password=s.redis_password or None, decode_responses=True,
+            )
+        else:
+            _client = redis.from_url(s.redis_url, decode_responses=True)
     return _client
 
 
@@ -139,6 +152,37 @@ async def call_ended(call_sid: str, summary: dict[str, Any]) -> None:
             await p.execute()
     except redis.RedisError as e:
         logger.error("call.ended write failed for {}: {}", call_sid, e)
+
+
+async def call_analyzed(call_sid: str, analysis: dict[str, Any]) -> None:
+    """After-call summary (app/analysis.py), a separate event after call.ended."""
+    s = get_settings()
+    r = client()
+    try:
+        async with r.pipeline(transaction=False) as p:
+            p.hset(key("call", call_sid), mapping=_flat({"analysis": analysis}))
+            p.xadd(
+                key("events"),
+                {"type": "call.analyzed", "call_sid": call_sid, "data": json.dumps(analysis)},
+                maxlen=s.events_stream_maxlen,
+                approximate=True,
+            )
+            await p.execute()
+    except redis.RedisError as e:
+        logger.warning("call.analyzed write failed for {}: {}", call_sid, e)
+
+
+async def event(event_type: str, data: dict[str, Any], **fields: str) -> None:
+    """Any other event on sakhii:voice:events (settings.rejected, ...)."""
+    try:
+        await client().xadd(
+            key("events"),
+            {"type": event_type, **fields, "data": json.dumps(data)},
+            maxlen=get_settings().events_stream_maxlen,
+            approximate=True,
+        )
+    except redis.RedisError as e:
+        logger.warning("{} event failed: {}", event_type, type(e).__name__)
 
 
 async def set_call_fields(call_sid: str, fields: dict[str, Any]) -> None:
